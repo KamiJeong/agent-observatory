@@ -24,6 +24,10 @@ are working in parallel:
 ![Status](https://img.shields.io/badge/status-MVP-3b82f6)
 ![Codex](https://img.shields.io/badge/Codex-0.149.0-64748b)
 
+## Demo
+
+![Codex Agent Observatory showing multiple agents running concurrently](docs/assets/agent-observatory-demo.gif)
+
 ## Quick Start
 
 ### Run directly with npx

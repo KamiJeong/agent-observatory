@@ -22,6 +22,10 @@ Codex Agent Observatory는 Codex 루트 에이전트와 서브에이전트의 �
 ![Status](https://img.shields.io/badge/status-MVP-3b82f6)
 ![Codex](https://img.shields.io/badge/Codex-0.149.0-64748b)
 
+## 데모
+
+![여러 에이전트가 동시에 실행 중인 Codex Agent Observatory](docs/assets/agent-observatory-demo.gif)
+
 ## 빠른 시작
 
 ### npx로 바로 실행
