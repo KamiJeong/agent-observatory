@@ -18,7 +18,7 @@ changelog:
     - title: Maintenance
       labels:
         - dependencies
-        - area: ci/cd
+        - "area: ci/cd"
     - title: Other changes
       labels:
         - "*"
