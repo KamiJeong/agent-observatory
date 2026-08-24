@@ -4,6 +4,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
     groups:
       bun-development:
         dependency-type: development
@@ -13,6 +16,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
     labels:
       - dependencies
       - "area: ci/cd"
