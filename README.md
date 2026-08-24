@@ -24,35 +24,28 @@ projection합니다.
 
 ### npx로 바로 실행
 
-설치 없이 GitHub의 최신 버전을 실행할 수 있습니다. 기본값은 Codex가 없어도
+npm package를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 Codex가 없어도
 동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
 
 ```bash
-npx github:KamiJeong/agent-observatory
+npx agent-observatory
 ```
 
 현재 머신에서 실행 중인 Codex agent들을 관측하려면 Real Mode를 사용합니다.
 
 ```bash
-npx github:KamiJeong/agent-observatory --real
+npx agent-observatory --real
 ```
 
 특정 working directory만 보거나 브라우저를 자동으로 열지 않을 수도 있습니다.
 
 ```bash
-npx github:KamiJeong/agent-observatory --real --cwd /absolute/path/to/project
-npx github:KamiJeong/agent-observatory --scenario stress --no-open
-```
-
-npm registry 배포 후에는 더 짧은 동일 명령을 사용할 수 있습니다.
-
-```bash
-npx agent-observatory
-npx agent-observatory --real
+npx agent-observatory --real --cwd /absolute/path/to/project
+npx agent-observatory --scenario stress --no-open
 ```
 
 기본 주소는 <http://127.0.0.1:4317>입니다. 모든 옵션은
-`npx github:KamiJeong/agent-observatory --help`로 확인할 수 있습니다.
+`npx agent-observatory --help`로 확인할 수 있습니다.
 
 ### 저장소를 clone해서 개발
 
