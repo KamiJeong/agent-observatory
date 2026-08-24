@@ -37,9 +37,9 @@ body:
       render: shell
       placeholder: |
         node --version
-        npm --version
+        bun --version
         codex --version
-        npx agent-observatory --version
+        bunx agent-observatory --version
     validations:
       required: true
   - type: dropdown

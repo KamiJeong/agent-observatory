@@ -25,10 +25,10 @@ Options:
   -v, --version          Show the package version
 
 Examples:
-  npx agent-observatory
-  npx agent-observatory --real
-  npx agent-observatory --real --cwd /projects/design-system
-  npx agent-observatory --scenario stress --no-open
+  bunx agent-observatory
+  bunx agent-observatory --real
+  bunx agent-observatory --real --cwd /projects/design-system
+  bunx agent-observatory --scenario stress --no-open
 `;
 
 let values;

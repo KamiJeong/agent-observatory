@@ -28,30 +28,30 @@ Codex Agent Observatory는 Codex 루트 에이전트와 서브에이전트의 �
 
 ## 빠른 시작
 
-### npx로 바로 실행
+### bunx로 바로 실행
 
 npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 Codex가 없어도
 동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
 
 ```bash
-npx agent-observatory
+bunx agent-observatory
 ```
 
 현재 머신에서 실행 중인 Codex 에이전트를 관측하려면 Real Mode를 사용합니다.
 
 ```bash
-npx agent-observatory --real
+bunx agent-observatory --real
 ```
 
 특정 작업 디렉터리만 보거나 브라우저를 자동으로 열지 않을 수도 있습니다.
 
 ```bash
-npx agent-observatory --real --cwd /absolute/path/to/project
-npx agent-observatory --scenario stress --no-open
+bunx agent-observatory --real --cwd /absolute/path/to/project
+bunx agent-observatory --scenario stress --no-open
 ```
 
 기본 주소는 <http://127.0.0.1:4317>입니다. 모든 옵션은
-`npx agent-observatory --help`로 확인할 수 있습니다.
+`bunx agent-observatory --help`로 확인할 수 있습니다.
 
 ### 저장소를 복제해서 개발
 
@@ -63,8 +63,8 @@ Codex가 설치되어 있지 않아도 픽스처와 실시간 모의 이벤트�
 ```bash
 git clone https://github.com/KamiJeong/agent-observatory.git
 cd agent-observatory
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 브라우저에서 <http://127.0.0.1:4318>을 엽니다.
@@ -76,7 +76,7 @@ Codex CLI가 설치되어 있고 로컬에서 에이전트 워크플로가 실�
 
 ```bash
 codex --version
-npm run dev:real
+bun run dev:real
 ```
 
 브라우저에서 <http://127.0.0.1:4318>을 엽니다. 기본 공유 호환 전송 방식은 현재
@@ -86,7 +86,7 @@ npm run dev:real
 Linux, macOS, PowerShell, 명령 프롬프트에서 같은 옵션을 사용할 수 있습니다.
 
 ```bash
-npm run dev:real -- --cwd /absolute/path/to/project
+bun run dev:real -- --cwd /absolute/path/to/project
 ```
 
 ## 화면 구성
@@ -185,7 +185,7 @@ Codex를 찾을 수 없습니다. 둘 다 WSL 안에서 실행하거나 둘 다 
 
 ```powershell
 codex -C C:\projects\my-app
-npm run dev:real -- --cwd C:\projects\my-app
+bun run dev:real -- --cwd C:\projects\my-app
 ```
 
 `-C`/`--cd`가 없으면 Windows CIM은 프로세스 작업 디렉터리를 제공하지 않습니다.
@@ -195,7 +195,7 @@ npm run dev:real -- --cwd C:\projects\my-app
 ## 요구 사항
 
 - Node.js 22.13 이상 (`node:sqlite` 필요)
-- npm 또는 호환되는 `npx` 실행 환경
+- Bun 1.4.0 이상
 - Real Mode용 Codex CLI 0.149.x
 - macOS: 시스템 `ps`, `lsof` 명령
 - Windows: CIM을 사용할 수 있는 Windows PowerShell
@@ -205,21 +205,21 @@ Mock Mode에는 Codex CLI가 필요하지 않습니다.
 ## 개발
 
 ```bash
-npm run dev          # 서버 :4317 + Vite :4318, Mock 시나리오 A
-npm run dev:real     # 크로스플랫폼 Real Mode 실행기
-npm run typecheck
-npm test
-npm run test:e2e
-npm run build
+bun run dev          # 서버 :4317 + Vite :4318, Mock 시나리오 A
+bun run dev:real     # 크로스플랫폼 Real Mode 실행기
+bun run typecheck
+bun run test
+bun run test:e2e
+bun run build
 ```
 
 기여 작업은 단기 브랜치와 `main` 대상 Pull Request를 사용합니다. 브랜치, 리뷰,
 CI 및 npm 릴리스 절차는 [`CONTRIBUTING.md`](CONTRIBUTING.md)를 참고하세요.
 
-`npm run build` 후에는 로컬 백엔드에서 프로덕션 웹 번들을 제공할 수 있습니다.
+`bun run build` 후에는 로컬 백엔드에서 프로덕션 웹 번들을 제공할 수 있습니다.
 
 ```bash
-npm run start -w @observatory/server
+bun run --filter @observatory/server start
 ```
 
 그런 다음 <http://127.0.0.1:4317>을 엽니다.
@@ -238,8 +238,8 @@ Main ●
 다른 픽스처는 다음과 같이 실행합니다.
 
 ```bash
-OBSERVATORY_SCENARIO=b npm run dev
-OBSERVATORY_SCENARIO=stress npm run dev
+OBSERVATORY_SCENARIO=b bun run dev
+OBSERVATORY_SCENARIO=stress bun run dev
 ```
 
 - `a`: 생성, 활동, 완료, 승인 대기, 복구
@@ -255,7 +255,7 @@ Real Mode는 기본적으로 공유 호환 전송 방식을 사용합니다. 현
 `project-b`처럼 여러 작업 디렉터리를 함께 볼 수 있습니다.
 
 ```bash
-npm run dev:real
+bun run dev:real
 ```
 
 공유 전송 방식은 기본적으로 모든 활성 Codex 작업 디렉터리를 표시합니다. 대시보드를
@@ -275,7 +275,7 @@ npm run dev:real
 예시:
 
 ```bash
-npm run dev:real -- --root-thread 019f...
+bun run dev:real -- --root-thread 019f...
 ```
 
 ### 실시간 관측 범위
@@ -355,9 +355,9 @@ codex app-server generate-json-schema --out ./generated/codex-schema-experimenta
 ## 테스트
 
 ```bash
-npm test             # 단위, 통합, CLI, UI 테스트 34개
-npm run test:e2e     # Chromium Mock 생명주기
-npm run build        # 타입 검사 + 프로덕션 프런트엔드 빌드
+bun run test         # 단위, 통합, CLI, UI 테스트 40개
+bun run test:e2e     # Chromium Mock 생명주기
+bun run build        # 타입 검사 + 프로덕션 프런트엔드 빌드
 ```
 
 테스트 범위:
@@ -380,7 +380,7 @@ npm run build        # 타입 검사 + 프로덕션 프런트엔드 빌드
 출력합니다. 브라우저 실행을 명시적으로 끄고 URL을 직접 여세요.
 
 ```bash
-npx agent-observatory --real --no-open
+bunx agent-observatory --real --no-open
 ```
 
 ### 대시보드의 연결 끊김 상태가 지속됨
@@ -407,8 +407,8 @@ Server 프로세스 종료를 별도로 재시도합니다. 연결과 프로토�
 지정하거나 범위를 비활성화하세요.
 
 ```bash
-npm run dev:real -- --cwd /path/to/project
-npm run dev:real -- --cwd all
+bun run dev:real -- --cwd /path/to/project
+bun run dev:real -- --cwd all
 ```
 
 알려진 워크플로 루트가 있다면 `OBSERVATORY_ROOT_THREAD_ID`를 사용하는 편이 좋습니다.
