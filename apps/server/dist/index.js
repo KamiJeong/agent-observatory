@@ -1,7 +1,7 @@
 // apps/server/src/index.ts
 import { existsSync as existsSync2, createReadStream } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join as join2, normalize } from "node:path";
+import { extname, join as join3, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/observatory-core/src/projector.ts
@@ -1178,18 +1178,21 @@ import {
   existsSync,
   fstatSync,
   openSync,
-  readFileSync,
   readSync,
-  readdirSync,
-  readlinkSync,
+  readdirSync as readdirSync2,
   statSync,
   watch
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { join as join2 } from "node:path";
+import { spawnSync as spawnSync3 } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-var ROOT_COMMANDS = /* @__PURE__ */ new Set([
+
+// apps/server/src/process-discovery.ts
+import { readFileSync, readdirSync, readlinkSync } from "node:fs";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { basename, join, win32 } from "node:path";
+var NON_INTERACTIVE_COMMANDS = /* @__PURE__ */ new Set([
   "agents",
   "app-server",
   "apply",
@@ -1202,7 +1205,6 @@ var ROOT_COMMANDS = /* @__PURE__ */ new Set([
   "exec",
   "exec-server",
   "features",
-  "fork",
   "login",
   "logout",
   "mcp",
@@ -1215,9 +1217,255 @@ var ROOT_COMMANDS = /* @__PURE__ */ new Set([
   "unarchive",
   "update"
 ]);
+var OPTIONS_WITH_VALUES = /* @__PURE__ */ new Set([
+  "-a",
+  "--add-dir",
+  "--ask-for-approval",
+  "-c",
+  "--cd",
+  "--config",
+  "-C",
+  "-i",
+  "--image",
+  "--local-provider",
+  "-m",
+  "--model",
+  "-p",
+  "--profile",
+  "--remote",
+  "--remote-auth-token-env",
+  "-s",
+  "--sandbox"
+]);
+function increment(map, key) {
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+function splitProcessCommandLine(commandLine) {
+  const tokens = [];
+  const pattern = /"((?:\\.|[^"\\])*)"|'([^']*)'|(\S+)/g;
+  for (const match of commandLine.matchAll(pattern)) {
+    tokens.push((match[1] ?? match[2] ?? match[3] ?? "").replace(/\\"/g, '"'));
+  }
+  return tokens;
+}
+function codexInvocation(commandLine, platform) {
+  const tokens = splitProcessCommandLine(commandLine);
+  const codexIndex = tokens.findIndex((token) => {
+    const name = (platform === "win32" ? win32.basename(token) : basename(token)).toLowerCase();
+    return name === "codex" || name === "codex.exe";
+  });
+  if (codexIndex === -1) return void 0;
+  const args = tokens.slice(codexIndex + 1);
+  let explicitCwd;
+  let subcommand;
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index] ?? "";
+    if (value.startsWith("--cd=")) {
+      explicitCwd = value.slice("--cd=".length);
+      continue;
+    }
+    if (value === "-C" || value === "--cd") {
+      explicitCwd = args[index + 1];
+      index += 1;
+      continue;
+    }
+    if (OPTIONS_WITH_VALUES.has(value)) {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("-")) continue;
+    subcommand = value;
+    break;
+  }
+  if (subcommand && NON_INTERACTIVE_COMMANDS.has(subcommand)) return void 0;
+  return explicitCwd ? { explicitCwd } : {};
+}
+function findInteractiveCodexCwds(procRoot = "/proc") {
+  const result = /* @__PURE__ */ new Map();
+  let entries;
+  try {
+    entries = readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry));
+  } catch {
+    return result;
+  }
+  for (const pid of entries) {
+    try {
+      const command = readFileSync(join(procRoot, pid, "cmdline"), "utf8").split("\0").filter(Boolean);
+      if (!codexInvocation(command.map((value) => JSON.stringify(value)).join(" "), "linux")) continue;
+      const cwd = readlinkSync(join(procRoot, pid, "cwd"));
+      if (cwd) increment(result, cwd);
+    } catch {
+    }
+  }
+  return result;
+}
+function parseMacProcessList(output) {
+  const result = [];
+  for (const line of output.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (Number.isInteger(pid) && codexInvocation(match[2] ?? "", "darwin")) result.push(pid);
+  }
+  return result;
+}
+function parseLsofCwds(output) {
+  const result = /* @__PURE__ */ new Map();
+  let pid;
+  for (const line of output.split("\n")) {
+    if (line.startsWith("p")) {
+      const value = Number(line.slice(1));
+      pid = Number.isInteger(value) ? value : void 0;
+    } else if (pid !== void 0 && line.startsWith("n") && line.length > 1) {
+      result.set(pid, line.slice(1));
+    }
+  }
+  return result;
+}
+function parseWindowsProcessList(output) {
+  const cwdCounts = /* @__PURE__ */ new Map();
+  let parsed;
+  try {
+    parsed = JSON.parse(output || "[]");
+  } catch {
+    return {
+      cwdCounts,
+      processCount: 0,
+      exact: false,
+      source: "windows-cim",
+      warning: "Windows process discovery returned invalid JSON"
+    };
+  }
+  const records = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? [parsed] : [];
+  let processCount = 0;
+  for (const record of records) {
+    if (typeof record.CommandLine !== "string") continue;
+    const invocation = codexInvocation(record.CommandLine, "win32");
+    if (!invocation) continue;
+    processCount += 1;
+    if (invocation.explicitCwd && win32.isAbsolute(invocation.explicitCwd)) {
+      increment(cwdCounts, invocation.explicitCwd);
+    }
+  }
+  const resolvedCwdCount = [...cwdCounts.values()].reduce((sum, count) => sum + count, 0);
+  return {
+    cwdCounts,
+    processCount,
+    exact: processCount === resolvedCwdCount,
+    source: "windows-cim",
+    ...processCount > 0 && processCount !== resolvedCwdCount ? { warning: "Windows does not expose process working directories; using the newest matching Codex roots" } : {}
+  };
+}
+function discoverMacProcesses() {
+  const ps = spawnSync2("ps", ["-axo", "pid=,command="], {
+    encoding: "utf8",
+    timeout: 5e3,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  if (ps.error || ps.status !== 0) {
+    return {
+      cwdCounts: /* @__PURE__ */ new Map(),
+      processCount: 0,
+      exact: false,
+      source: "macos-ps-lsof",
+      warning: ps.error?.message ?? (ps.stderr?.trim() || "ps failed")
+    };
+  }
+  const pids = parseMacProcessList(ps.stdout ?? "");
+  if (pids.length === 0) {
+    return { cwdCounts: /* @__PURE__ */ new Map(), processCount: 0, exact: true, source: "macos-ps-lsof" };
+  }
+  const lsof = spawnSync2("lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fn"], {
+    encoding: "utf8",
+    timeout: 5e3,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  const byPid = parseLsofCwds(lsof.stdout ?? "");
+  const cwdCounts = /* @__PURE__ */ new Map();
+  for (const cwd of byPid.values()) increment(cwdCounts, cwd);
+  const exact = byPid.size === pids.length;
+  return {
+    cwdCounts,
+    processCount: pids.length,
+    exact,
+    source: "macos-ps-lsof",
+    ...!exact ? { warning: lsof.error?.message ?? (lsof.stderr?.trim() || "lsof could not resolve every Codex cwd") } : {}
+  };
+}
+function discoverWindowsProcesses() {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "Get-CimInstance Win32_Process |",
+    `Where-Object { $_.Name -ieq 'codex.exe' -or $_.CommandLine -match '(?:^|[\\\\/])codex(?:\\.exe)?(?:"|\\s|$)' } |`,
+    "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+  ].join(" ");
+  const powershell = spawnSync2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    timeout: 8e3,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  if (powershell.error || powershell.status !== 0) {
+    return {
+      cwdCounts: /* @__PURE__ */ new Map(),
+      processCount: 0,
+      exact: false,
+      source: "windows-cim",
+      warning: powershell.error?.message ?? (powershell.stderr?.trim() || "PowerShell process discovery failed")
+    };
+  }
+  return parseWindowsProcessList(powershell.stdout?.trim() ?? "");
+}
+function discoverInteractiveCodexProcesses(platform = process.platform) {
+  if (platform === "linux") {
+    const cwdCounts = findInteractiveCodexCwds();
+    return {
+      cwdCounts,
+      processCount: [...cwdCounts.values()].reduce((sum, count) => sum + count, 0),
+      exact: true,
+      source: "procfs"
+    };
+  }
+  if (platform === "darwin") return discoverMacProcesses();
+  if (platform === "win32") return discoverWindowsProcesses();
+  return {
+    cwdCounts: /* @__PURE__ */ new Map(),
+    processCount: 0,
+    exact: false,
+    source: "unsupported",
+    warning: `Process discovery is not implemented for ${platform}`
+  };
+}
+function pathKey(value, platform) {
+  if (platform === "win32") {
+    return win32.normalize(value).replace(/^\\\\\?\\/, "").replace(/[\\/]+$/, "").toLowerCase();
+  }
+  return value.replace(/\/+$/, "") || "/";
+}
+function samePath(left, right, platform) {
+  return pathKey(left, platform) === pathKey(right, platform);
+}
+function selectRootThreadIds(roots, discovery, configuredCwd, rootOverride, platform = process.platform) {
+  if (rootOverride) return /* @__PURE__ */ new Set([rootOverride]);
+  const eligible = configuredCwd === "all" ? roots : roots.filter((root) => root.cwd && samePath(root.cwd, configuredCwd, platform));
+  const selected = /* @__PURE__ */ new Set();
+  for (const [cwd, count] of discovery.cwdCounts) {
+    for (const root of eligible.filter((candidate) => candidate.cwd && samePath(candidate.cwd, cwd, platform)).slice(0, count)) {
+      selected.add(root.id);
+    }
+  }
+  if (discovery.exact) return selected;
+  const unresolvedCount = Math.max(0, discovery.processCount - selected.size);
+  for (const root of eligible.filter((candidate) => !selected.has(candidate.id)).sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0)).slice(0, unresolvedCount)) {
+    selected.add(root.id);
+  }
+  return selected;
+}
+
+// apps/server/src/shared-state-adapter.ts
 var ACTIVITY_LIMIT_PER_THREAD = 30;
 var GLOBAL_ACTIVITY_LIMIT = 300;
 var SAFETY_REFRESH_MS = 15e3;
+var PROCESS_DISCOVERY_CACHE_MS = 2e3;
 var ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024;
 var SEEN_ACTIVITY_LIMIT = 3e3;
 function numberValue2(value) {
@@ -1436,34 +1684,12 @@ function readRolloutTail(path) {
   }
 }
 function latestVersionedDatabase(codexHome, prefix) {
-  const matches = readdirSync(codexHome).filter((name) => new RegExp(`^${prefix}_[0-9]+\\.sqlite$`).test(name)).sort((a, b) => {
+  const matches = readdirSync2(codexHome).filter((name) => new RegExp(`^${prefix}_[0-9]+\\.sqlite$`).test(name)).sort((a, b) => {
     const aVersion = Number(a.match(/_([0-9]+)\.sqlite$/)?.[1] ?? 0);
     const bVersion = Number(b.match(/_([0-9]+)\.sqlite$/)?.[1] ?? 0);
     return bVersion - aVersion;
   });
-  return matches[0] ? join(codexHome, matches[0]) : void 0;
-}
-function findInteractiveCodexCwds(procRoot = "/proc") {
-  const result = /* @__PURE__ */ new Map();
-  let entries;
-  try {
-    entries = readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry));
-  } catch {
-    return result;
-  }
-  for (const pid of entries) {
-    try {
-      const command = readFileSync(join(procRoot, pid, "cmdline"), "utf8").split("\0").filter(Boolean);
-      if (command.length === 0 || basename(command[0] ?? "") !== "codex") continue;
-      const subcommand = command.slice(1).find((value) => !value.startsWith("-"));
-      if (subcommand && ROOT_COMMANDS.has(subcommand)) continue;
-      const cwd = readlinkSync(join(procRoot, pid, "cwd"));
-      if (!cwd) continue;
-      result.set(cwd, (result.get(cwd) ?? 0) + 1);
-    } catch {
-    }
-  }
-  return result;
+  return matches[0] ? join2(codexHome, matches[0]) : void 0;
 }
 function rowSnapshot(row, rollout) {
   const id = stringValue2(row.id);
@@ -1506,6 +1732,8 @@ var SharedStateCodexAdapter = class {
   #lastLifecycle = /* @__PURE__ */ new Map();
   #lastThreadFingerprint = /* @__PURE__ */ new Map();
   #rolloutCache = /* @__PURE__ */ new Map();
+  #processDiscoveryCache;
+  #lastDiscoveryWarning;
   runtimeInfo() {
     return {
       adapter: "codex",
@@ -1527,9 +1755,9 @@ var SharedStateCodexAdapter = class {
       at: Date.now(),
       connection: { phase: "connecting", attempt: 0, message: "Connecting to shared Codex state" }
     });
-    const version = spawnSync2("codex", ["--version"], { encoding: "utf8" });
+    const version = spawnSync3("codex", ["--version"], { encoding: "utf8" });
     this.#codexVersion = version.stdout.trim().replace(/^codex-cli\s+/, "") || "unknown";
-    const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+    const codexHome = process.env.CODEX_HOME ?? join2(homedir(), ".codex");
     const stateDbPath = latestVersionedDatabase(codexHome, "state");
     if (!stateDbPath) throw new Error(`Codex state database was not found in ${codexHome}`);
     this.#db = new DatabaseSync(stateDbPath, { readOnly: true });
@@ -1553,6 +1781,7 @@ var SharedStateCodexAdapter = class {
     if (this.#safetyTimer) clearInterval(this.#safetyTimer);
     this.#refreshTimer = void 0;
     this.#safetyTimer = void 0;
+    this.#processDiscoveryCache = void 0;
     for (const watcher of this.#watchers) watcher.close();
     this.#watchers = [];
     this.#db?.close();
@@ -1598,7 +1827,7 @@ var SharedStateCodexAdapter = class {
     } catch (error) {
       this.#debug("Unable to watch Codex state database", error);
     }
-    const sessions = join(codexHome, "sessions");
+    const sessions = join2(codexHome, "sessions");
     if (existsSync(sessions)) {
       try {
         this.#watchers.push(watch(sessions, { recursive: true }, (_event, file) => {
@@ -1634,22 +1863,31 @@ var SharedStateCodexAdapter = class {
         WHERE t.archived = 0
         ORDER BY t.updated_at_ms DESC
       `).all();
-      const processCwds = findInteractiveCodexCwds();
+      const processDiscovery = this.#processDiscovery();
+      if (processDiscovery.warning && processDiscovery.warning !== this.#lastDiscoveryWarning) {
+        this.#lastDiscoveryWarning = processDiscovery.warning;
+        this.#debug(processDiscovery.warning, { source: processDiscovery.source });
+      }
       const configuredCwd = process.env.OBSERVATORY_CWD ?? "all";
       const rootOverride = process.env.OBSERVATORY_ROOT_THREAD_ID;
       const roots = rows.filter((row) => !stringValue2(row.parent_thread_id));
-      const selectedRoots = /* @__PURE__ */ new Set();
-      if (rootOverride) {
-        selectedRoots.add(rootOverride);
-      } else {
-        for (const [cwd, count] of processCwds) {
-          if (configuredCwd !== "all" && cwd !== configuredCwd) continue;
-          for (const row of roots.filter((candidate) => candidate.cwd === cwd).slice(0, count)) {
-            const id = stringValue2(row.id);
-            if (id) selectedRoots.add(id);
-          }
-        }
-      }
+      const rootCandidates = roots.flatMap((row) => {
+        const id = stringValue2(row.id);
+        if (!id) return [];
+        const cwd = stringValue2(row.cwd);
+        const updatedAt = numberValue2(row.updated_at_ms);
+        return [{
+          id,
+          ...cwd ? { cwd } : {},
+          ...updatedAt !== void 0 ? { updatedAt } : {}
+        }];
+      });
+      const selectedRoots = selectRootThreadIds(
+        rootCandidates,
+        processDiscovery,
+        configuredCwd,
+        rootOverride
+      );
       const selected = new Set(selectedRoots);
       let changed = true;
       while (changed) {
@@ -1666,20 +1904,25 @@ var SharedStateCodexAdapter = class {
       const next = /* @__PURE__ */ new Map();
       for (const row of rows) {
         const id = stringValue2(row.id);
-        const cwd = stringValue2(row.cwd);
         if (!id || !selected.has(id)) continue;
         const rolloutPath = stringValue2(row.rollout_path);
         if (!rolloutPath || !existsSync(rolloutPath)) continue;
         const isRoot = !stringValue2(row.parent_thread_id);
+        const processActive = isRoot && selectedRoots.has(id);
         const file = statSync(rolloutPath);
         const cached = this.#rolloutCache.get(rolloutPath);
-        const rollout = cached && cached.size === file.size && cached.mtimeMs === file.mtimeMs ? cached.state : parseRolloutState(
+        const rollout = cached && cached.size === file.size && cached.mtimeMs === file.mtimeMs && cached.processActive === processActive ? cached.state : parseRolloutState(
           readRolloutTail(rolloutPath),
           id,
           isRoot,
-          Boolean(cwd && processCwds.has(cwd))
+          processActive
         );
-        this.#rolloutCache.set(rolloutPath, { size: file.size, mtimeMs: file.mtimeMs, state: rollout });
+        this.#rolloutCache.set(rolloutPath, {
+          size: file.size,
+          mtimeMs: file.mtimeMs,
+          processActive,
+          state: rollout
+        });
         const snapshot = rowSnapshot(row, rollout);
         if (!snapshot) continue;
         next.set(id, { snapshot, rolloutPath, rollout });
@@ -1699,6 +1942,15 @@ var SharedStateCodexAdapter = class {
         this.#scheduleRefresh();
       }
     }
+  }
+  #processDiscovery() {
+    const now = Date.now();
+    if (this.#processDiscoveryCache && now - this.#processDiscoveryCache.at < PROCESS_DISCOVERY_CACHE_MS) {
+      return this.#processDiscoveryCache.value;
+    }
+    const value = discoverInteractiveCodexProcesses();
+    this.#processDiscoveryCache = { at: now, value };
+    return value;
   }
   #projectThread(thread) {
     const at = thread.rollout.lastEventAt ?? Date.now();
@@ -1811,8 +2063,8 @@ var server = createServer((request, response) => {
     return;
   }
   const relative = requestUrl.pathname === "/" ? "index.html" : requestUrl.pathname.slice(1);
-  const candidate = normalize(join2(webDist, relative));
-  const safePath = candidate.startsWith(webDist) && existsSync2(candidate) ? candidate : join2(webDist, "index.html");
+  const candidate = normalize(join3(webDist, relative));
+  const safePath = candidate.startsWith(webDist) && existsSync2(candidate) ? candidate : join3(webDist, "index.html");
   response.writeHead(200, { "content-type": contentTypes[extname(safePath)] ?? "application/octet-stream" });
   createReadStream(safePath).pipe(response);
 });
