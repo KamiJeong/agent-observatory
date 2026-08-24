@@ -86,10 +86,11 @@ Open <http://127.0.0.1:4318> in a browser. By default, the shared compatibility
 transport discovers all active Codex working directories observable on the
 current machine.
 
-To view only one project, specify its exact working directory.
+To view only one project, specify its exact working directory. The development
+launcher accepts the same scope on Linux, macOS, PowerShell, and Command Prompt.
 
 ```bash
-OBSERVATORY_CWD=/absolute/path/to/project npm run dev:real
+npm run dev:real -- --cwd /absolute/path/to/project
 ```
 
 ## Dashboard layout
@@ -172,11 +173,37 @@ collab completed       → COMPLETED
 
 In particular, `notLoaded` and `thread/closed` never imply completion.
 
+## Platform support
+
+| Platform | Real Mode discovery | Status |
+| --- | --- | --- |
+| Linux / WSL2 | Reads interactive process cwd values from `/proc` | Supported; locally verified on WSL2 Linux |
+| macOS | Finds Codex processes with `ps` and resolves cwd values with `lsof` | Implemented; native-device verification pending |
+| Windows | Finds Codex processes through PowerShell CIM; uses `-C`/`--cd` when present and otherwise selects the newest matching root from Codex state | Implemented; native-device verification pending |
+
+Codex and Observatory must run in the same OS environment and use the same
+`CODEX_HOME`. For example, a native Windows Observatory cannot discover Codex
+running inside WSL; run both inside WSL or both on Windows.
+
+On native Windows, starting Codex with an explicit cwd gives Observatory an
+exact process-to-project mapping:
+
+```powershell
+codex -C C:\projects\my-app
+npm run dev:real -- --cwd C:\projects\my-app
+```
+
+Without `-C`/`--cd`, Windows does not expose a process working directory through
+CIM. Observatory remains usable by selecting the newest unarchived root per
+detected interactive Codex process, and records that approximation in Debug.
+
 ## Requirements
 
-- Node.js 20.19 or later
+- Node.js 22.13 or later (`node:sqlite` is required)
 - npm or a compatible `npx` runtime
 - Codex CLI 0.149.x for Real Mode
+- macOS: the system `ps` and `lsof` commands
+- Windows: Windows PowerShell with CIM available
 
 Mock Mode does not require Codex CLI.
 
@@ -184,6 +211,7 @@ Mock Mode does not require Codex CLI.
 
 ```bash
 npm run dev          # server :4317 + Vite :4318, Mock scenario A
+npm run dev:real     # cross-platform Real Mode launcher
 npm run typecheck
 npm test
 npm run test:e2e
@@ -250,9 +278,7 @@ Environment options:
 Example:
 
 ```bash
-OBSERVATORY_ADAPTER=codex \
-OBSERVATORY_ROOT_THREAD_ID=019f... \
-npm run dev
+npm run dev:real -- --root-thread 019f...
 ```
 
 ### Real-time observation boundary
@@ -388,8 +414,8 @@ The default cwd scope may not match the thread. Supply the exact directory or
 disable the scope:
 
 ```bash
-OBSERVATORY_CWD=/path/to/project npm run dev:real
-OBSERVATORY_CWD=all npm run dev:real
+npm run dev:real -- --cwd /path/to/project
+npm run dev:real -- --cwd all
 ```
 
 For a known workflow root, prefer `OBSERVATORY_ROOT_THREAD_ID` so experimental

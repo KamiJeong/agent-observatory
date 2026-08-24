@@ -29,7 +29,7 @@
     "developer-tools"
   ],
   "engines": {
-    "node": ">=20.19"
+    "node": ">=22.13"
   },
   "workspaces": [
     "apps/*",
@@ -37,7 +37,7 @@
   ],
   "scripts": {
     "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w @observatory/server\" \"npm run dev -w @observatory/web\"",
-    "dev:real": "OBSERVATORY_ADAPTER=codex npm run dev",
+    "dev:real": "node scripts/run-dev-real.mjs",
     "build": "npm run typecheck && npm run build -w @observatory/web",
     "build:server": "esbuild apps/server/src/index.ts --bundle --platform=node --format=esm --external:ws --outfile=apps/server/dist/index.js",
     "build:cli": "npm run build && npm run build:server",

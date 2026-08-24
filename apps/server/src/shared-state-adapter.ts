@@ -6,13 +6,12 @@ import {
   readFileSync,
   readSync,
   readdirSync,
-  readlinkSync,
   statSync,
   watch,
   type FSWatcher,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import type {
@@ -25,6 +24,14 @@ import type {
   RuntimeInfo,
   ThreadSnapshot,
 } from "@observatory/core";
+import {
+  discoverInteractiveCodexProcesses,
+  selectRootThreadIds,
+  type InteractiveCodexProcesses,
+  type RootThreadCandidate,
+} from "./process-discovery.ts";
+
+export { findInteractiveCodexCwds } from "./process-discovery.ts";
 
 type SqlValue = string | number | bigint | null;
 type SqlRow = Record<string, SqlValue>;
@@ -47,36 +54,10 @@ interface SharedThread {
   rollout: RolloutState;
 }
 
-const ROOT_COMMANDS = new Set([
-  "agents",
-  "app-server",
-  "apply",
-  "archive",
-  "cloud",
-  "completion",
-  "debug",
-  "delete",
-  "doctor",
-  "exec",
-  "exec-server",
-  "features",
-  "fork",
-  "login",
-  "logout",
-  "mcp",
-  "mcp-server",
-  "plugin",
-  "queue",
-  "remote-control",
-  "review",
-  "sandbox",
-  "unarchive",
-  "update",
-]);
-
 const ACTIVITY_LIMIT_PER_THREAD = 30;
 const GLOBAL_ACTIVITY_LIMIT = 300;
 const SAFETY_REFRESH_MS = 15_000;
+const PROCESS_DISCOVERY_CACHE_MS = 2_000;
 const ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024;
 const SEEN_ACTIVITY_LIMIT = 3_000;
 
@@ -346,33 +327,6 @@ function latestVersionedDatabase(codexHome: string, prefix: string): string | un
   return matches[0] ? join(codexHome, matches[0]) : undefined;
 }
 
-export function findInteractiveCodexCwds(procRoot = "/proc"): Map<string, number> {
-  const result = new Map<string, number>();
-  let entries: string[];
-  try {
-    entries = readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry));
-  } catch {
-    return result;
-  }
-
-  for (const pid of entries) {
-    try {
-      const command = readFileSync(join(procRoot, pid, "cmdline"), "utf8")
-        .split("\0")
-        .filter(Boolean);
-      if (command.length === 0 || basename(command[0] ?? "") !== "codex") continue;
-      const subcommand = command.slice(1).find((value) => !value.startsWith("-"));
-      if (subcommand && ROOT_COMMANDS.has(subcommand)) continue;
-      const cwd = readlinkSync(join(procRoot, pid, "cwd"));
-      if (!cwd) continue;
-      result.set(cwd, (result.get(cwd) ?? 0) + 1);
-    } catch {
-      // Processes can disappear while /proc is being scanned.
-    }
-  }
-  return result;
-}
-
 function rowSnapshot(row: SqlRow, rollout: RolloutState): ThreadSnapshot | undefined {
   const id = stringValue(row.id);
   if (!id) return undefined;
@@ -414,7 +368,14 @@ export class SharedStateCodexAdapter implements CodexAdapter {
   #seenActivityOrder: string[] = [];
   #lastLifecycle = new Map<string, string>();
   #lastThreadFingerprint = new Map<string, string>();
-  #rolloutCache = new Map<string, { size: number; mtimeMs: number; state: RolloutState }>();
+  #rolloutCache = new Map<string, {
+    size: number;
+    mtimeMs: number;
+    processActive: boolean;
+    state: RolloutState;
+  }>();
+  #processDiscoveryCache?: { at: number; value: InteractiveCodexProcesses };
+  #lastDiscoveryWarning?: string;
 
   runtimeInfo(): RuntimeInfo {
     return {
@@ -466,6 +427,7 @@ export class SharedStateCodexAdapter implements CodexAdapter {
     if (this.#safetyTimer) clearInterval(this.#safetyTimer);
     this.#refreshTimer = undefined;
     this.#safetyTimer = undefined;
+    this.#processDiscoveryCache = undefined;
     for (const watcher of this.#watchers) watcher.close();
     this.#watchers = [];
     this.#db?.close();
@@ -555,22 +517,31 @@ export class SharedStateCodexAdapter implements CodexAdapter {
         WHERE t.archived = 0
         ORDER BY t.updated_at_ms DESC
       `).all() as SqlRow[];
-      const processCwds = findInteractiveCodexCwds();
+      const processDiscovery = this.#processDiscovery();
+      if (processDiscovery.warning && processDiscovery.warning !== this.#lastDiscoveryWarning) {
+        this.#lastDiscoveryWarning = processDiscovery.warning;
+        this.#debug(processDiscovery.warning, { source: processDiscovery.source });
+      }
       const configuredCwd = process.env.OBSERVATORY_CWD ?? "all";
       const rootOverride = process.env.OBSERVATORY_ROOT_THREAD_ID;
       const roots = rows.filter((row) => !stringValue(row.parent_thread_id));
-      const selectedRoots = new Set<string>();
-      if (rootOverride) {
-        selectedRoots.add(rootOverride);
-      } else {
-        for (const [cwd, count] of processCwds) {
-          if (configuredCwd !== "all" && cwd !== configuredCwd) continue;
-          for (const row of roots.filter((candidate) => candidate.cwd === cwd).slice(0, count)) {
-            const id = stringValue(row.id);
-            if (id) selectedRoots.add(id);
-          }
-        }
-      }
+      const rootCandidates = roots.flatMap((row): RootThreadCandidate[] => {
+        const id = stringValue(row.id);
+        if (!id) return [];
+        const cwd = stringValue(row.cwd);
+        const updatedAt = numberValue(row.updated_at_ms);
+        return [{
+          id,
+          ...(cwd ? { cwd } : {}),
+          ...(updatedAt !== undefined ? { updatedAt } : {}),
+        }];
+      });
+      const selectedRoots = selectRootThreadIds(
+        rootCandidates,
+        processDiscovery,
+        configuredCwd,
+        rootOverride,
+      );
 
       const selected = new Set(selectedRoots);
       let changed = true;
@@ -589,22 +560,30 @@ export class SharedStateCodexAdapter implements CodexAdapter {
       const next = new Map<string, SharedThread>();
       for (const row of rows) {
         const id = stringValue(row.id);
-        const cwd = stringValue(row.cwd);
         if (!id || !selected.has(id)) continue;
         const rolloutPath = stringValue(row.rollout_path);
         if (!rolloutPath || !existsSync(rolloutPath)) continue;
         const isRoot = !stringValue(row.parent_thread_id);
+        const processActive = isRoot && selectedRoots.has(id);
         const file = statSync(rolloutPath);
         const cached = this.#rolloutCache.get(rolloutPath);
-        const rollout = cached && cached.size === file.size && cached.mtimeMs === file.mtimeMs
+        const rollout = cached
+          && cached.size === file.size
+          && cached.mtimeMs === file.mtimeMs
+          && cached.processActive === processActive
           ? cached.state
           : parseRolloutState(
               readRolloutTail(rolloutPath),
               id,
               isRoot,
-              Boolean(cwd && processCwds.has(cwd)),
+              processActive,
             );
-        this.#rolloutCache.set(rolloutPath, { size: file.size, mtimeMs: file.mtimeMs, state: rollout });
+        this.#rolloutCache.set(rolloutPath, {
+          size: file.size,
+          mtimeMs: file.mtimeMs,
+          processActive,
+          state: rollout,
+        });
         const snapshot = rowSnapshot(row, rollout);
         if (!snapshot) continue;
         next.set(id, { snapshot, rolloutPath, rollout });
@@ -627,6 +606,16 @@ export class SharedStateCodexAdapter implements CodexAdapter {
         this.#scheduleRefresh();
       }
     }
+  }
+
+  #processDiscovery(): InteractiveCodexProcesses {
+    const now = Date.now();
+    if (this.#processDiscoveryCache && now - this.#processDiscoveryCache.at < PROCESS_DISCOVERY_CACHE_MS) {
+      return this.#processDiscoveryCache.value;
+    }
+    const value = discoverInteractiveCodexProcesses();
+    this.#processDiscoveryCache = { at: now, value };
+    return value;
   }
 
   #projectThread(thread: SharedThread): void {

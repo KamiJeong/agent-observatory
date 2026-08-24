@@ -82,10 +82,11 @@ npm run dev:real
 브라우저에서 <http://127.0.0.1:4318>을 엽니다. 기본 공유 호환 전송 방식은 현재
 머신에서 관측 가능한 활성 Codex 작업 디렉터리를 함께 탐색합니다.
 
-특정 프로젝트만 보고 싶다면 정확한 작업 디렉터리를 지정합니다.
+특정 프로젝트만 보고 싶다면 정확한 작업 디렉터리를 지정합니다. 개발용 실행기는
+Linux, macOS, PowerShell, 명령 프롬프트에서 같은 옵션을 사용할 수 있습니다.
 
 ```bash
-OBSERVATORY_CWD=/absolute/path/to/project npm run dev:real
+npm run dev:real -- --cwd /absolute/path/to/project
 ```
 
 ## 화면 구성
@@ -167,11 +168,37 @@ collab completed       → COMPLETED
 
 특히 `notLoaded`와 `thread/closed`는 완료를 의미하지 않습니다.
 
+## 플랫폼 지원
+
+| 플랫폼 | Real Mode 탐색 방식 | 상태 |
+| --- | --- | --- |
+| Linux / WSL2 | `/proc`에서 대화형 프로세스의 cwd를 읽음 | 지원됨, WSL2 Linux에서 로컬 검증 |
+| macOS | `ps`로 Codex 프로세스를 찾고 `lsof`로 cwd를 확인 | 구현됨, 네이티브 기기 검증 예정 |
+| Windows | PowerShell CIM으로 Codex 프로세스를 찾고 `-C`/`--cd`가 있으면 사용, 없으면 Codex 상태에서 가장 최근 루트를 선택 | 구현됨, 네이티브 기기 검증 예정 |
+
+Codex와 Observatory는 같은 OS 환경에서 실행되고 동일한 `CODEX_HOME`을 사용해야
+합니다. 예를 들어 네이티브 Windows에서 실행한 Observatory는 WSL 안에서 실행 중인
+Codex를 찾을 수 없습니다. 둘 다 WSL 안에서 실행하거나 둘 다 Windows에서 실행하세요.
+
+네이티브 Windows에서는 Codex를 명시적인 cwd와 함께 시작하면 프로젝트를 정확하게
+연결할 수 있습니다.
+
+```powershell
+codex -C C:\projects\my-app
+npm run dev:real -- --cwd C:\projects\my-app
+```
+
+`-C`/`--cd`가 없으면 Windows CIM은 프로세스 작업 디렉터리를 제공하지 않습니다.
+이때 Observatory는 감지한 대화형 Codex 프로세스 수만큼 가장 최근의 보관되지 않은
+루트를 선택하며, 이 근사 탐색 사실을 Debug에 기록합니다.
+
 ## 요구 사항
 
-- Node.js 20.19 이상
+- Node.js 22.13 이상 (`node:sqlite` 필요)
 - npm 또는 호환되는 `npx` 실행 환경
 - Real Mode용 Codex CLI 0.149.x
+- macOS: 시스템 `ps`, `lsof` 명령
+- Windows: CIM을 사용할 수 있는 Windows PowerShell
 
 Mock Mode에는 Codex CLI가 필요하지 않습니다.
 
@@ -179,6 +206,7 @@ Mock Mode에는 Codex CLI가 필요하지 않습니다.
 
 ```bash
 npm run dev          # 서버 :4317 + Vite :4318, Mock 시나리오 A
+npm run dev:real     # 크로스플랫폼 Real Mode 실행기
 npm run typecheck
 npm test
 npm run test:e2e
@@ -244,9 +272,7 @@ npm run dev:real
 예시:
 
 ```bash
-OBSERVATORY_ADAPTER=codex \
-OBSERVATORY_ROOT_THREAD_ID=019f... \
-npm run dev
+npm run dev:real -- --root-thread 019f...
 ```
 
 ### 실시간 관측 범위
@@ -378,8 +404,8 @@ Server 프로세스 종료를 별도로 재시도합니다. 연결과 프로토�
 지정하거나 범위를 비활성화하세요.
 
 ```bash
-OBSERVATORY_CWD=/path/to/project npm run dev:real
-OBSERVATORY_CWD=all npm run dev:real
+npm run dev:real -- --cwd /path/to/project
+npm run dev:real -- --cwd all
 ```
 
 알려진 워크플로 루트가 있다면 `OBSERVATORY_ROOT_THREAD_ID`를 사용하는 편이 좋습니다.
