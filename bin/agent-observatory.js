@@ -101,11 +101,15 @@ function openBrowser(target) {
     : process.platform === "win32"
       ? { file: "cmd", args: ["/c", "start", "", target] }
       : { file: "xdg-open", args: [target] };
+  const reportFailure = () => {
+    console.warn(`Could not open a browser automatically. Open ${target} manually.`);
+  };
   try {
     const child = spawn(command.file, command.args, { detached: true, stdio: "ignore" });
+    child.once("error", reportFailure);
     child.unref();
   } catch {
-    // The server always prints the URL, so browser launch is optional.
+    reportFailure();
   }
 }
 

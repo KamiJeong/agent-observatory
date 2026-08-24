@@ -323,7 +323,7 @@ events.
 ## Testing
 
 ```bash
-npm test             # 33 unit, integration, and UI tests
+npm test             # 34 unit, integration, CLI, and UI tests
 npm run test:e2e     # Chromium mock lifecycle
 npm run build        # typecheck + production frontend build
 ```
@@ -340,6 +340,17 @@ Coverage includes:
 - browser spawn → complete → wait → inspector flow
 
 ## Troubleshooting
+
+### Browser does not open automatically
+
+Minimal Linux containers and headless environments may not provide `xdg-open`.
+Observatory continues running and prints its local URL when automatic browser
+launch is unavailable. Disable browser launch explicitly and open the URL
+manually:
+
+```bash
+npx agent-observatory --real --no-open
+```
 
 ### Dashboard stays disconnected
 
