@@ -31,21 +31,22 @@
   "engines": {
     "node": ">=22.13"
   },
+  "packageManager": "bun@1.4.0",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w @observatory/server\" \"npm run dev -w @observatory/web\"",
+    "dev": "concurrently -n server,web -c yellow,cyan \"bun run --filter @observatory/server dev\" \"bun run --filter @observatory/web dev\"",
     "dev:real": "node scripts/run-dev-real.mjs",
-    "build": "npm run typecheck && npm run build -w @observatory/web",
+    "build": "bun run typecheck && bun run --filter @observatory/web build",
     "build:server": "esbuild apps/server/src/index.ts --bundle --platform=node --format=esm --external:ws --outfile=apps/server/dist/index.js",
-    "build:cli": "npm run build && npm run build:server",
+    "build:cli": "bun run build && bun run build:server",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "node scripts/run-e2e.mjs",
-    "prepack": "npm run build:cli"
+    "prepack": "bun run build:cli"
   },
   "dependencies": {
     "ws": "^8.18.3"

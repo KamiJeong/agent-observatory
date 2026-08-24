@@ -18,10 +18,10 @@
 
 <!-- List exact commands and any manual checks performed. -->
 
-- [ ] `npm run typecheck`
-- [ ] `npm test`
-- [ ] `npm run build:cli`
-- [ ] `npm run test:e2e` when user-facing behavior changed
+- [ ] `bun run typecheck`
+- [ ] `bun run test`
+- [ ] `bun run build:cli`
+- [ ] `bun run test:e2e` when user-facing behavior changed
 
 ## Risk and rollback
 

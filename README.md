@@ -30,31 +30,31 @@ are working in parallel:
 
 ## Quick Start
 
-### Run directly with npx
+### Run directly with bunx
 
 Run without installing the npm package separately. The default is Mock Mode,
 which works without Codex and opens a browser automatically.
 
 ```bash
-npx agent-observatory
+bunx agent-observatory
 ```
 
 Use Real Mode to observe Codex agents running on the current machine.
 
 ```bash
-npx agent-observatory --real
+bunx agent-observatory --real
 ```
 
 You can also limit observation to a specific working directory or disable
 automatic browser launch.
 
 ```bash
-npx agent-observatory --real --cwd /absolute/path/to/project
-npx agent-observatory --scenario stress --no-open
+bunx agent-observatory --real --cwd /absolute/path/to/project
+bunx agent-observatory --scenario stress --no-open
 ```
 
 The default address is <http://127.0.0.1:4317>. Run
-`npx agent-observatory --help` to see all options.
+`bunx agent-observatory --help` to see all options.
 
 ### Clone the repository for development
 
@@ -66,8 +66,8 @@ Codex is not installed.
 ```bash
 git clone https://github.com/KamiJeong/agent-observatory.git
 cd agent-observatory
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 Open <http://127.0.0.1:4318> in a browser.
@@ -79,7 +79,7 @@ locally.
 
 ```bash
 codex --version
-npm run dev:real
+bun run dev:real
 ```
 
 Open <http://127.0.0.1:4318> in a browser. By default, the shared compatibility
@@ -90,7 +90,7 @@ To view only one project, specify its exact working directory. The development
 launcher accepts the same scope on Linux, macOS, PowerShell, and Command Prompt.
 
 ```bash
-npm run dev:real -- --cwd /absolute/path/to/project
+bun run dev:real -- --cwd /absolute/path/to/project
 ```
 
 ## Dashboard layout
@@ -190,7 +190,7 @@ exact process-to-project mapping:
 
 ```powershell
 codex -C C:\projects\my-app
-npm run dev:real -- --cwd C:\projects\my-app
+bun run dev:real -- --cwd C:\projects\my-app
 ```
 
 Without `-C`/`--cd`, Windows does not expose a process working directory through
@@ -200,7 +200,7 @@ detected interactive Codex process, and records that approximation in Debug.
 ## Requirements
 
 - Node.js 22.13 or later (`node:sqlite` is required)
-- npm or a compatible `npx` runtime
+- Bun 1.4.0 or later
 - Codex CLI 0.149.x for Real Mode
 - macOS: the system `ps` and `lsof` commands
 - Windows: Windows PowerShell with CIM available
@@ -210,22 +210,22 @@ Mock Mode does not require Codex CLI.
 ## Development
 
 ```bash
-npm run dev          # server :4317 + Vite :4318, Mock scenario A
-npm run dev:real     # cross-platform Real Mode launcher
-npm run typecheck
-npm test
-npm run test:e2e
-npm run build
+bun run dev          # server :4317 + Vite :4318, Mock scenario A
+bun run dev:real     # cross-platform Real Mode launcher
+bun run typecheck
+bun run test
+bun run test:e2e
+bun run build
 ```
 
 Contributions use short-lived branches and pull requests into `main`. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch, review, CI, and npm release
 workflow.
 
-After `npm run build`, the local backend can serve the production web bundle:
+After `bun run build`, the local backend can serve the production web bundle:
 
 ```bash
-npm run start -w @observatory/server
+bun run --filter @observatory/server start
 ```
 
 Then open <http://127.0.0.1:4317>.
@@ -244,8 +244,8 @@ Main ●
 Run another fixture with:
 
 ```bash
-OBSERVATORY_SCENARIO=b npm run dev
-OBSERVATORY_SCENARIO=stress npm run dev
+OBSERVATORY_SCENARIO=b bun run dev
+OBSERVATORY_SCENARIO=stress bun run dev
 ```
 
 - `a`: spawn, activity, completion, approval waiting, recovery
@@ -262,7 +262,7 @@ watchers. This allows one dashboard to show multiple working directories such
 as `project-a` and `project-b` together.
 
 ```bash
-npm run dev:real
+bun run dev:real
 ```
 
 The shared transport defaults to every active Codex working directory. Set
@@ -282,7 +282,7 @@ Environment options:
 Example:
 
 ```bash
-npm run dev:real -- --root-thread 019f...
+bun run dev:real -- --root-thread 019f...
 ```
 
 ### Real-time observation boundary
@@ -364,9 +364,9 @@ events.
 ## Testing
 
 ```bash
-npm test             # 34 unit, integration, CLI, and UI tests
-npm run test:e2e     # Chromium mock lifecycle
-npm run build        # typecheck + production frontend build
+bun run test         # 40 unit, integration, CLI, and UI tests
+bun run test:e2e     # Chromium mock lifecycle
+bun run build        # typecheck + production frontend build
 ```
 
 Coverage includes:
@@ -390,7 +390,7 @@ launch is unavailable. Disable browser launch explicitly and open the URL
 manually:
 
 ```bash
-npx agent-observatory --real --no-open
+bunx agent-observatory --real --no-open
 ```
 
 ### Dashboard stays disconnected
@@ -418,8 +418,8 @@ The default cwd scope may not match the thread. Supply the exact directory or
 disable the scope:
 
 ```bash
-npm run dev:real -- --cwd /path/to/project
-npm run dev:real -- --cwd all
+bun run dev:real -- --cwd /path/to/project
+bun run dev:real -- --cwd all
 ```
 
 For a known workflow root, prefer `OBSERVATORY_ROOT_THREAD_ID` so experimental

@@ -30,7 +30,7 @@ const snapshot: ObservatorySnapshot = {
     },
   },
   activities: [{
-    id: "test", agentId: "tester", kind: "test", title: "Running vitest", detail: "npm test", startedAt: 100,
+    id: "test", agentId: "tester", kind: "test", title: "Running vitest", detail: "bun run test", startedAt: 100,
   }],
   pendingRequests: {},
   connection: { phase: "connected", attempt: 0 },

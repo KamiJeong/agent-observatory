@@ -395,7 +395,7 @@ function toThreadSnapshot(value) {
   };
 }
 function commandLooksLikeTest(command) {
-  return /(^|\s)(vitest|jest|pytest|go test|cargo test|npm (run )?test|pnpm (run )?test|bun test)(\s|$)/i.test(
+  return /(^|\s)(vitest|jest|pytest|go test|cargo test|npm (run )?test|pnpm (run )?test|bun (run )?test)(\s|$)/i.test(
     command
   );
 }
@@ -1098,7 +1098,7 @@ var MockCodexAdapter = class {
     });
     this.#schedule(3800, () => {
       this.#discover(baseThread("mock-tester", "Tester", "testing", active(), "mock-main", 1));
-      this.#activity("mock-tester", "run-tests", "test", "Running vitest", "npm test");
+      this.#activity("mock-tester", "run-tests", "test", "Running vitest", "bun run test");
     });
     this.#schedule(5100, () => {
       this.#emit({

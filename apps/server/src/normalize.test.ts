@@ -61,27 +61,29 @@ describe("protocol normalization", () => {
   });
 
   it("classifies a test command and ignores additive fields", () => {
-    const events = normalizeEnvelope({
-      method: "item/started",
-      params: {
-        threadId: "tester",
-        turnId: "turn",
-        future: "allowed",
-        item: {
-          type: "commandExecution",
-          id: "cmd",
-          command: "npm run test -- --watch=false",
-          cwd: "/repo",
-          status: "inProgress",
-          commandActions: [],
-          addedLater: 1,
+    for (const command of ["npm run test -- --watch=false", "bun run test -- --watch=false"]) {
+      const events = normalizeEnvelope({
+        method: "item/started",
+        params: {
+          threadId: "tester",
+          turnId: "turn",
+          future: "allowed",
+          item: {
+            type: "commandExecution",
+            id: "cmd",
+            command,
+            cwd: "/repo",
+            status: "inProgress",
+            commandActions: [],
+            addedLater: 1,
+          },
         },
-      },
-    }, 1000);
-    expect(events[0]).toMatchObject({
-      type: "activity.started",
-      activity: { id: "cmd", kind: "test", title: "Running tests" },
-    });
+      }, 1000);
+      expect(events[0]).toMatchObject({
+        type: "activity.started",
+        activity: { id: "cmd", kind: "test", title: "Running tests" },
+      });
+    }
   });
 
   it("extracts explicit collab completion states", () => {

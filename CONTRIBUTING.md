@@ -30,12 +30,12 @@ and keeps generated release notes readable.
 Run the same checks used by CI before requesting review:
 
 ```bash
-npm ci
-npm run typecheck
-npm test
-npm run build:cli
-npx playwright install chromium
-npm run test:e2e
+bun ci
+bun run typecheck
+bun run test
+bun run build:cli
+bunx playwright install chromium
+bun run test:e2e
 ```
 
 Keep pull requests focused. Update documentation when commands, configuration,
@@ -49,8 +49,8 @@ Releases are initiated by a version-only pull request after the intended feature
 and fix pull requests have reached `main`.
 
 1. Create `release/x.y.z` from the latest `main`.
-2. Run `npm version patch --no-git-tag-version` (or `minor`/`major`).
-3. Review `package.json` and `package-lock.json`, then open a pull request labeled
+2. Run `bun pm version patch --no-git-tag-version` (or `minor`/`major`).
+3. Review `package.json` and `bun.lock`, then open a pull request labeled
    `release`.
 4. Merge only after `Quality` and `E2E` pass.
 5. The `Publish npm` workflow repeats the full test suite, publishes the new
