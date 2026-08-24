@@ -1,58 +1,63 @@
 # Codex Agent Observatory
 
-Codex Agent Observatory는 Codex root agent와 subagent의 관계, 실행 상태,
-현재 활동, approval/user-input 대기, 최근 tool/file/command를 한 화면에서 보는
-로컬 Agent Observability Dashboard입니다.
+[English](README.md) | [한국어](README.ko.md)
 
-로그를 그대로 출력하는 viewer가 아니라 Codex App Server protocol을
-Observatory domain event로 정규화한 뒤, agent graph와 bounded activity timeline으로
-projection합니다.
+Codex Agent Observatory is a local agent observability dashboard for viewing
+Codex root-agent and subagent relationships, execution status, current activity,
+approval or user-input waits, and recent tool, file, and command activity in one
+place.
 
-여러 Codex가 병렬로 일할 때 다음 질문에 빠르게 답하는 것이 목표입니다.
+Rather than displaying raw logs, it normalizes the Codex App Server protocol
+into Observatory domain events and projects them onto an agent graph and a
+bounded activity timeline.
 
-- 지금 누가 작업 중인가?
-- 어떤 Agent가 사용자 입력이나 approval을 기다리는가?
-- Parent와 subagent는 어떻게 연결되어 있는가?
-- 각 Agent는 어떤 model, effort, skill, workflow evidence를 사용하는가?
-- 최근 어떤 command, tool, file activity가 발생했는가?
-- 어느 작업이 끝났고 어디에서 문제가 발생했는가?
+Its goal is to quickly answer the following questions when multiple Codex agents
+are working in parallel:
+
+- Who is working right now?
+- Which agents are waiting for user input or approval?
+- How are parent agents and subagents connected?
+- Which model, effort, skill, and workflow evidence does each agent use?
+- Which command, tool, and file activities occurred recently?
+- Which tasks finished, and where did problems occur?
 
 ![Status](https://img.shields.io/badge/status-MVP-3b82f6)
 ![Codex](https://img.shields.io/badge/Codex-0.149.0-64748b)
 
 ## Quick Start
 
-### npx로 바로 실행
+### Run directly with npx
 
-npm package를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 Codex가 없어도
-동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
+Run without installing the npm package separately. The default is Mock Mode,
+which works without Codex and opens a browser automatically.
 
 ```bash
 npx agent-observatory
 ```
 
-현재 머신에서 실행 중인 Codex agent들을 관측하려면 Real Mode를 사용합니다.
+Use Real Mode to observe Codex agents running on the current machine.
 
 ```bash
 npx agent-observatory --real
 ```
 
-특정 working directory만 보거나 브라우저를 자동으로 열지 않을 수도 있습니다.
+You can also limit observation to a specific working directory or disable
+automatic browser launch.
 
 ```bash
 npx agent-observatory --real --cwd /absolute/path/to/project
 npx agent-observatory --scenario stress --no-open
 ```
 
-기본 주소는 <http://127.0.0.1:4317>입니다. 모든 옵션은
-`npx agent-observatory --help`로 확인할 수 있습니다.
+The default address is <http://127.0.0.1:4317>. Run
+`npx agent-observatory --help` to see all options.
 
-### 저장소를 clone해서 개발
+### Clone the repository for development
 
-#### 1. Mock Mode로 시작
+#### 1. Start in Mock Mode
 
-Codex가 설치되어 있지 않아도 fixture와 실시간 mock event로 전체 UI를 확인할 수
-있습니다.
+Explore the complete UI with fixtures and real-time mock events, even when
+Codex is not installed.
 
 ```bash
 git clone https://github.com/KamiJeong/agent-observatory.git
@@ -61,39 +66,41 @@ npm install
 npm run dev
 ```
 
-브라우저에서 <http://127.0.0.1:4318>을 엽니다.
+Open <http://127.0.0.1:4318> in a browser.
 
-#### 2. 현재 실행 중인 Codex 관측
+#### 2. Observe currently running Codex agents
 
-Codex CLI가 설치되어 있고 로컬에서 Agent workflow가 실행 중이라면 Real Mode를
-사용합니다.
+Use Real Mode when Codex CLI is installed and an agent workflow is running
+locally.
 
 ```bash
 codex --version
 npm run dev:real
 ```
 
-브라우저에서 <http://127.0.0.1:4318>을 엽니다. 기본 shared compatibility transport는
-현재 머신에서 관측 가능한 active Codex working directory를 함께 탐색합니다.
+Open <http://127.0.0.1:4318> in a browser. By default, the shared compatibility
+transport discovers all active Codex working directories observable on the
+current machine.
 
-특정 프로젝트만 보고 싶다면 정확한 working directory를 지정합니다.
+To view only one project, specify its exact working directory.
 
 ```bash
 OBSERVATORY_CWD=/absolute/path/to/project npm run dev:real
 ```
 
-## 화면 구성
+## Dashboard layout
 
-- **Agents**: Parent/child tree, status, role, model/effort, skill/workflow evidence
-- **Agent Graph**: root와 subagent topology, pan/zoom/fit, node selection
-- **Workflow Board**: 관측된 workflow별 Agent lane과 Started/Status/Updated 정렬
-- **Activity**: tool, command, file, test, error event를 필터링하는 virtualized timeline
-- **Inspector**: 선택한 Agent의 runtime metadata와 virtualized recent activity
-- **Debug**: protocol event, normalized event, connection/version diagnostics
+- **Agents**: Parent/child tree, status, role, model/effort, and skill/workflow evidence
+- **Agent Graph**: Root and subagent topology, pan/zoom/fit, and node selection
+- **Workflow Board**: Agent lanes grouped by observed workflow, sortable by Started/Status/Updated
+- **Activity**: Virtualized timeline with filters for tool, command, file, test, and error events
+- **Inspector**: Runtime metadata and virtualized recent activity for the selected agent
+- **Debug**: Protocol events, normalized events, and connection/version diagnostics
 
-Workflow Board의 `Observed order`는 Agent 시작 시각이나 업데이트 시각으로 계산한
-관측 순서입니다. Codex가 선언한 workflow stage 또는 orchestration ownership으로
-간주하지 않습니다. 근거가 없으면 추측하지 않고 `No workflow evidence`로 표시합니다.
+The Workflow Board's `Observed order` is derived from agent start or update
+times. It does not represent a workflow stage or orchestration ownership
+declared by Codex. When no supporting evidence exists, the UI displays
+`No workflow evidence` instead of guessing.
 
 ## Architecture
 
@@ -163,11 +170,11 @@ In particular, `notLoaded` and `thread/closed` never imply completion.
 
 ## Requirements
 
-- Node.js 20.19 이상
-- npm 또는 호환되는 `npx` 실행 환경
+- Node.js 20.19 or later
+- npm or a compatible `npx` runtime
 - Codex CLI 0.149.x for Real Mode
 
-Mock Mode에는 Codex CLI가 필요하지 않습니다.
+Mock Mode does not require Codex CLI.
 
 ## Development
 
