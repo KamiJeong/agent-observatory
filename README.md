@@ -200,7 +200,7 @@ detected interactive Codex process, and records that approximation in Debug.
 ## Requirements
 
 - Node.js 22.13 or later (`node:sqlite` is required)
-- Bun 1.4.0 or later
+- Bun 1.3.14
 - Codex CLI 0.149.x for Real Mode
 - macOS: the system `ps` and `lsof` commands
 - Windows: Windows PowerShell with CIM available

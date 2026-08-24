@@ -195,7 +195,7 @@ bun run dev:real -- --cwd C:\projects\my-app
 ## 요구 사항
 
 - Node.js 22.13 이상 (`node:sqlite` 필요)
-- Bun 1.4.0 이상
+- Bun 1.3.14
 - Real Mode용 Codex CLI 0.149.x
 - macOS: 시스템 `ps`, `lsof` 명령
 - Windows: CIM을 사용할 수 있는 Windows PowerShell
