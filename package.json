@@ -1,8 +1,36 @@
 {
-  "name": "codex-agent-observatory",
+  "name": "agent-observatory",
   "version": "0.1.0",
-  "private": true,
+  "description": "Local observability dashboard for Codex CLI multi-agent workflows",
+  "license": "MIT",
   "type": "module",
+  "bin": {
+    "agent-observatory": "bin/agent-observatory.js"
+  },
+  "files": [
+    "bin",
+    "apps/server/dist",
+    "apps/web/dist",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KamiJeong/agent-observatory.git"
+  },
+  "homepage": "https://github.com/KamiJeong/agent-observatory#readme",
+  "bugs": {
+    "url": "https://github.com/KamiJeong/agent-observatory/issues"
+  },
+  "keywords": [
+    "codex",
+    "agents",
+    "observability",
+    "dashboard",
+    "developer-tools"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -11,10 +39,16 @@
     "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w @observatory/server\" \"npm run dev -w @observatory/web\"",
     "dev:real": "OBSERVATORY_ADAPTER=codex npm run dev",
     "build": "npm run typecheck && npm run build -w @observatory/web",
+    "build:server": "esbuild apps/server/src/index.ts --bundle --platform=node --format=esm --external:ws --outfile=apps/server/dist/index.js",
+    "build:cli": "npm run build && npm run build:server",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "node scripts/run-e2e.mjs"
+    "test:e2e": "node scripts/run-e2e.mjs",
+    "prepack": "npm run build:cli"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
@@ -26,6 +60,7 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
+    "esbuild": "^0.28.2",
     "jsdom": "^26.1.0",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",

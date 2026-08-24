@@ -22,7 +22,41 @@ projection합니다.
 
 ## Quick Start
 
-### 1. Mock Mode로 시작
+### npx로 바로 실행
+
+설치 없이 GitHub의 최신 버전을 실행할 수 있습니다. 기본값은 Codex가 없어도
+동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
+
+```bash
+npx github:KamiJeong/agent-observatory
+```
+
+현재 머신에서 실행 중인 Codex agent들을 관측하려면 Real Mode를 사용합니다.
+
+```bash
+npx github:KamiJeong/agent-observatory --real
+```
+
+특정 working directory만 보거나 브라우저를 자동으로 열지 않을 수도 있습니다.
+
+```bash
+npx github:KamiJeong/agent-observatory --real --cwd /absolute/path/to/project
+npx github:KamiJeong/agent-observatory --scenario stress --no-open
+```
+
+npm registry 배포 후에는 더 짧은 동일 명령을 사용할 수 있습니다.
+
+```bash
+npx agent-observatory
+npx agent-observatory --real
+```
+
+기본 주소는 <http://127.0.0.1:4317>입니다. 모든 옵션은
+`npx github:KamiJeong/agent-observatory --help`로 확인할 수 있습니다.
+
+### 저장소를 clone해서 개발
+
+#### 1. Mock Mode로 시작
 
 Codex가 설치되어 있지 않아도 fixture와 실시간 mock event로 전체 UI를 확인할 수
 있습니다.
@@ -36,7 +70,7 @@ npm run dev
 
 브라우저에서 <http://127.0.0.1:4318>을 엽니다.
 
-### 2. 현재 실행 중인 Codex 관측
+#### 2. 현재 실행 중인 Codex 관측
 
 Codex CLI가 설치되어 있고 로컬에서 Agent workflow가 실행 중이라면 Real Mode를
 사용합니다.
@@ -136,8 +170,8 @@ In particular, `notLoaded` and `thread/closed` never imply completion.
 
 ## Requirements
 
-- Node.js 24 or a current Node.js release compatible with Vite 7
-- npm 12+
+- Node.js 20.19 이상
+- npm 또는 호환되는 `npx` 실행 환경
 - Codex CLI 0.149.x for Real Mode
 
 Mock Mode에는 Codex CLI가 필요하지 않습니다.

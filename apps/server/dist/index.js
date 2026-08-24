@@ -1,0 +1,1853 @@
+// apps/server/src/index.ts
+import { existsSync as existsSync2, createReadStream } from "node:fs";
+import { createServer } from "node:http";
+import { extname, join as join2, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// packages/observatory-core/src/projector.ts
+var DEFAULT_ACTIVITY_LIMIT = 300;
+var DEFAULT_DEBUG_LIMIT = 150;
+var RECENT_ACTIVITY_LIMIT = 30;
+function projectNativeStatus(status) {
+  switch (status.type) {
+    case "active": {
+      const waitingReasons = [];
+      if (status.activeFlags.includes("waitingOnApproval")) {
+        waitingReasons.push("approval");
+      }
+      if (status.activeFlags.includes("waitingOnUserInput")) {
+        waitingReasons.push("userInput");
+      }
+      return {
+        status: waitingReasons.length > 0 ? "waiting" : "working",
+        waitingReasons
+      };
+    }
+    case "idle":
+      return { status: "idle", waitingReasons: [] };
+    case "systemError":
+      return { status: "failed", waitingReasons: [] };
+    case "notLoaded":
+      return { status: "unknown", waitingReasons: [] };
+  }
+}
+function createInitialState(runtime, now = Date.now()) {
+  return {
+    agents: {},
+    activities: [],
+    pendingRequests: {},
+    connection: { phase: "connecting", attempt: 0 },
+    runtime,
+    debug: [],
+    startedAt: now,
+    revision: 0
+  };
+}
+function agentFromThread(thread) {
+  const projected = projectNativeStatus(thread.nativeStatus);
+  return {
+    id: thread.id,
+    threadId: thread.id,
+    ...thread.parentThreadId ? { parentId: thread.parentThreadId } : {},
+    ...thread.sessionId ? { sessionId: thread.sessionId } : {},
+    ...thread.nickname ? { nickname: thread.nickname } : {},
+    ...thread.role ? { role: thread.role } : {},
+    status: projected.status,
+    nativeStatus: thread.nativeStatus,
+    waitingReasons: projected.waitingReasons,
+    ...thread.createdAt ? { startedAt: thread.createdAt } : {},
+    ...thread.updatedAt ? { updatedAt: thread.updatedAt } : {},
+    recentActivityIds: [],
+    children: [],
+    ...thread.cwd ? { cwd: thread.cwd } : {},
+    ...thread.model ? { model: thread.model } : {},
+    ...thread.modelProvider ? { modelProvider: thread.modelProvider } : {},
+    ...thread.reasoningEffort ? { reasoningEffort: thread.reasoningEffort } : {},
+    ...thread.observedSkills ? { observedSkills: thread.observedSkills } : {},
+    ...thread.observedWorkflows ? { observedWorkflows: thread.observedWorkflows } : {},
+    ...thread.collaborationMode ? { collaborationMode: thread.collaborationMode } : {},
+    ...thread.source !== void 0 ? { source: thread.source } : {},
+    ...thread.depth !== void 0 ? { depth: thread.depth } : {},
+    ...thread.path ? { path: thread.path } : {}
+  };
+}
+function ensureAgent(state, threadId, at) {
+  return state.agents[threadId] ?? {
+    id: threadId,
+    threadId,
+    status: "unknown",
+    waitingReasons: [],
+    updatedAt: at,
+    recentActivityIds: [],
+    children: []
+  };
+}
+function waitingReasonsFromRequests(state, threadId) {
+  return Array.from(
+    new Set(
+      Object.values(state.pendingRequests).filter((request) => request.agentId === threadId).map((request) => request.reason)
+    )
+  );
+}
+function rebuildChildren(agents) {
+  const next = Object.fromEntries(
+    Object.entries(agents).map(([id, agent]) => [id, { ...agent, children: [] }])
+  );
+  for (const agent of Object.values(next)) {
+    if (!agent.parentId) continue;
+    const parent = next[agent.parentId];
+    if (parent && !parent.children.includes(agent.id)) parent.children.push(agent.id);
+  }
+  for (const agent of Object.values(next)) agent.children.sort();
+  return next;
+}
+function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT, debug: DEFAULT_DEBUG_LIMIT }) {
+  let next = {
+    ...state,
+    agents: { ...state.agents },
+    pendingRequests: { ...state.pendingRequests },
+    revision: state.revision + 1
+  };
+  switch (event.type) {
+    case "thread.discovered": {
+      const previous = state.agents[event.thread.id];
+      const discovered = agentFromThread(event.thread);
+      if (previous) {
+        const terminal = previous.completionEvidence !== void 0;
+        next.agents[event.thread.id] = {
+          ...previous,
+          ...discovered,
+          ...terminal ? { status: previous.status, waitingReasons: [] } : {},
+          recentActivityIds: previous.recentActivityIds,
+          currentActivityId: previous.currentActivityId,
+          completionEvidence: previous.completionEvidence,
+          completedAt: previous.completedAt
+        };
+      } else {
+        next.agents[event.thread.id] = discovered;
+      }
+      next.agents = rebuildChildren(next.agents);
+      break;
+    }
+    case "thread.status": {
+      const previous = ensureAgent(state, event.threadId, event.at);
+      const projected = projectNativeStatus(event.status);
+      const explicitTerminal = previous.completionEvidence !== void 0;
+      next.agents[event.threadId] = {
+        ...previous,
+        nativeStatus: event.status,
+        status: explicitTerminal ? previous.status : projected.status,
+        waitingReasons: explicitTerminal ? [] : projected.waitingReasons,
+        updatedAt: event.at
+      };
+      break;
+    }
+    case "agent.lifecycle": {
+      const previous = ensureAgent(state, event.threadId, event.at);
+      const mapped = { updatedAt: event.at };
+      if (event.status === "completed") {
+        Object.assign(mapped, {
+          status: "completed",
+          completedAt: event.at,
+          currentActivityId: void 0,
+          waitingReasons: [],
+          completionEvidence: "collab-completed"
+        });
+      } else if (event.status === "errored") {
+        Object.assign(mapped, {
+          status: "failed",
+          completedAt: event.at,
+          currentActivityId: void 0,
+          waitingReasons: [],
+          completionEvidence: "collab-errored"
+        });
+      } else if (event.status === "running" || event.status === "pendingInit") {
+        Object.assign(mapped, {
+          status: "working",
+          waitingReasons: [],
+          completionEvidence: void 0,
+          completedAt: void 0
+        });
+      } else if (event.status === "interrupted") {
+        Object.assign(mapped, { status: "idle", waitingReasons: [] });
+      }
+      next.agents[event.threadId] = { ...previous, ...mapped };
+      break;
+    }
+    case "turn.started": {
+      const previous = ensureAgent(state, event.threadId, event.at);
+      next.agents[event.threadId] = {
+        ...previous,
+        status: "working",
+        waitingReasons: [],
+        currentTurnId: event.turnId,
+        completionEvidence: void 0,
+        completedAt: void 0,
+        updatedAt: event.at
+      };
+      break;
+    }
+    case "turn.completed": {
+      const previous = ensureAgent(state, event.threadId, event.at);
+      next.agents[event.threadId] = {
+        ...previous,
+        ...event.status === "failed" ? {
+          status: "failed",
+          completionEvidence: "turn-failed"
+        } : {},
+        currentTurnId: void 0,
+        currentActivityId: void 0,
+        updatedAt: event.at
+      };
+      break;
+    }
+    case "activity.started": {
+      const previous = ensureAgent(state, event.activity.agentId, event.at);
+      next.activities = [event.activity, ...state.activities.filter((item) => item.id !== event.activity.id)].slice(
+        0,
+        limits.activities
+      );
+      next.agents[event.activity.agentId] = {
+        ...previous,
+        currentActivityId: event.activity.id,
+        recentActivityIds: [
+          event.activity.id,
+          ...previous.recentActivityIds.filter((id) => id !== event.activity.id)
+        ].slice(0, RECENT_ACTIVITY_LIMIT),
+        updatedAt: event.at
+      };
+      break;
+    }
+    case "activity.completed": {
+      const previous = ensureAgent(state, event.threadId, event.at);
+      const existing = state.activities.find((activity) => activity.id === event.activityId);
+      const completed = event.activity ?? (existing ? { ...existing, completedAt: event.at, ...event.outcome ? { outcome: event.outcome } : {} } : void 0);
+      next.activities = completed ? [completed, ...state.activities.filter((item) => item.id !== completed.id)].slice(0, limits.activities) : state.activities;
+      next.agents[event.threadId] = {
+        ...previous,
+        ...previous.currentActivityId === event.activityId ? { currentActivityId: void 0 } : {},
+        updatedAt: event.at
+      };
+      break;
+    }
+    case "request.opened": {
+      next.pendingRequests[event.request.id] = event.request;
+      const previous = ensureAgent(state, event.request.agentId, event.at);
+      const reasons = Array.from(/* @__PURE__ */ new Set([...previous.waitingReasons, event.request.reason]));
+      next.agents[event.request.agentId] = {
+        ...previous,
+        status: "waiting",
+        waitingReasons: reasons,
+        updatedAt: event.at
+      };
+      break;
+    }
+    case "request.resolved": {
+      const request = state.pendingRequests[event.requestId];
+      delete next.pendingRequests[event.requestId];
+      const threadId = event.threadId ?? request?.agentId;
+      if (threadId) {
+        const previous = ensureAgent(state, threadId, event.at);
+        const remaining = waitingReasonsFromRequests(next, threadId);
+        next.agents[threadId] = {
+          ...previous,
+          status: remaining.length > 0 ? "waiting" : previous.nativeStatus?.type === "active" ? "working" : previous.status,
+          waitingReasons: remaining,
+          updatedAt: event.at
+        };
+      }
+      break;
+    }
+    case "token.updated": {
+      const previous = ensureAgent(state, event.threadId, event.at);
+      next.agents[event.threadId] = { ...previous, tokenUsage: event.usage, updatedAt: event.at };
+      break;
+    }
+    case "connection.changed":
+      next.connection = event.connection;
+      break;
+    case "runtime.updated":
+      next.runtime = event.runtime;
+      break;
+    case "debug":
+      next.debug = [event.entry, ...state.debug].slice(0, limits.debug);
+      break;
+  }
+  return next;
+}
+function buildGraph(agents) {
+  const roots = [];
+  const edges = [];
+  for (const agent of Object.values(agents)) {
+    if (agent.parentId && agents[agent.parentId]) {
+      edges.push({
+        id: `${agent.parentId}->${agent.id}`,
+        source: agent.parentId,
+        target: agent.id
+      });
+    } else {
+      roots.push(agent.id);
+    }
+  }
+  roots.sort((a, b) => (agents[a]?.startedAt ?? 0) - (agents[b]?.startedAt ?? 0));
+  return { roots, edges };
+}
+function toSnapshot(state) {
+  return { ...state, ...buildGraph(state.agents) };
+}
+
+// packages/observatory-core/src/store.ts
+var ObservatoryStore = class {
+  #state;
+  #listeners = /* @__PURE__ */ new Set();
+  constructor(runtime, now) {
+    this.#state = createInitialState(runtime, now);
+  }
+  apply(event) {
+    this.#state = reduceEvent(this.#state, event);
+    const snapshot = this.snapshot();
+    for (const listener of this.#listeners) listener(snapshot, event);
+    return snapshot;
+  }
+  snapshot() {
+    return toSnapshot(this.#state);
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+};
+
+// apps/server/src/index.ts
+import { WebSocketServer, WebSocket } from "ws";
+
+// apps/server/src/codex-adapter.ts
+import { spawn, spawnSync } from "node:child_process";
+import readline from "node:readline";
+
+// apps/server/src/normalize.ts
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : void 0;
+}
+function numberValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function stringArray(value) {
+  if (!Array.isArray(value)) return void 0;
+  const strings = value.filter((item) => typeof item === "string");
+  return strings.length > 0 ? strings : void 0;
+}
+function statusValue(value) {
+  if (!isRecord(value) || typeof value.type !== "string") return { type: "notLoaded" };
+  if (value.type === "active") {
+    return {
+      type: "active",
+      activeFlags: Array.isArray(value.activeFlags) ? value.activeFlags.filter((flag) => typeof flag === "string") : []
+    };
+  }
+  if (value.type === "idle" || value.type === "systemError" || value.type === "notLoaded") {
+    return { type: value.type };
+  }
+  return { type: "notLoaded" };
+}
+function spawnedSource(source) {
+  if (!isRecord(source)) return void 0;
+  const subAgent = isRecord(source.subAgent) ? source.subAgent : isRecord(source.subagent) ? source.subagent : void 0;
+  if (!subAgent || !isRecord(subAgent.thread_spawn)) return void 0;
+  return subAgent.thread_spawn;
+}
+function toThreadSnapshot(value) {
+  if (!isRecord(value) || typeof value.id !== "string") return void 0;
+  const spawn2 = spawnedSource(value.source);
+  const parentThreadId = stringValue(value.parentThreadId) ?? stringValue(spawn2?.parent_thread_id);
+  const nickname = stringValue(value.agentNickname) ?? stringValue(spawn2?.agent_nickname);
+  const role = stringValue(value.agentRole) ?? stringValue(spawn2?.agent_role);
+  const model = stringValue(value.model);
+  const reasoningEffort = stringValue(value.reasoningEffort) ?? stringValue(value.effort);
+  const observedSkills = stringArray(value.observedSkills);
+  const observedWorkflows = stringArray(value.observedWorkflows);
+  const collaborationMode = stringValue(value.collaborationMode);
+  const createdAtSeconds = numberValue(value.createdAt);
+  const updatedAtSeconds = numberValue(value.updatedAt);
+  return {
+    id: value.id,
+    ...stringValue(value.sessionId) ? { sessionId: stringValue(value.sessionId) } : {},
+    ...parentThreadId ? { parentThreadId } : {},
+    ...stringValue(value.forkedFromId) ? { forkedFromId: stringValue(value.forkedFromId) } : {},
+    ...nickname ? { nickname } : {},
+    ...role ? { role } : {},
+    nativeStatus: statusValue(value.status),
+    ...createdAtSeconds !== void 0 ? { createdAt: createdAtSeconds * 1e3 } : {},
+    ...updatedAtSeconds !== void 0 ? { updatedAt: updatedAtSeconds * 1e3 } : {},
+    ...stringValue(value.cwd) ? { cwd: stringValue(value.cwd) } : {},
+    ...model ? { model } : {},
+    ...stringValue(value.modelProvider) ? { modelProvider: stringValue(value.modelProvider) } : {},
+    ...reasoningEffort ? { reasoningEffort } : {},
+    ...observedSkills ? { observedSkills } : {},
+    ...observedWorkflows ? { observedWorkflows } : {},
+    ...collaborationMode ? { collaborationMode } : {},
+    ...value.source !== void 0 ? { source: value.source } : {},
+    ...numberValue(spawn2?.depth) !== void 0 ? { depth: numberValue(spawn2?.depth) } : {},
+    ...stringValue(spawn2?.agent_path) ? { path: stringValue(spawn2?.agent_path) } : {}
+  };
+}
+function commandLooksLikeTest(command) {
+  return /(^|\s)(vitest|jest|pytest|go test|cargo test|npm (run )?test|pnpm (run )?test|bun test)(\s|$)/i.test(
+    command
+  );
+}
+function itemOutcome(item) {
+  if (item.status === "failed") return "failed";
+  if (item.status === "declined") return "declined";
+  if (item.status === "completed") return "completed";
+  return void 0;
+}
+function activityFromItem(item, threadId, at, completed) {
+  const id = stringValue(item.id) ?? `${threadId}:${at}`;
+  const base = {
+    id,
+    agentId: threadId,
+    startedAt: completed ? at - (numberValue(item.durationMs) ?? 0) : at,
+    ...completed ? { completedAt: at } : {},
+    ...itemOutcome(item) ? { outcome: itemOutcome(item) } : {}
+  };
+  switch (item.type) {
+    case "reasoning":
+      return { ...base, kind: "thinking", title: "Thinking" };
+    case "commandExecution": {
+      const command = stringValue(item.command) ?? "Command";
+      const actions = Array.isArray(item.commandActions) ? item.commandActions.filter(isRecord) : [];
+      const onlyReads = actions.length > 0 && actions.every(
+        (action) => action.type === "read" || action.type === "listFiles" || action.type === "search"
+      );
+      const kind = commandLooksLikeTest(command) ? "test" : onlyReads ? "read" : "command";
+      return {
+        ...base,
+        kind,
+        title: kind === "test" ? "Running tests" : kind === "read" ? "Reading workspace" : "Running command",
+        detail: command,
+        metadata: {
+          cwd: item.cwd,
+          exitCode: item.exitCode,
+          commandActions: item.commandActions
+        }
+      };
+    }
+    case "fileChange": {
+      const changes = Array.isArray(item.changes) ? item.changes.filter(isRecord) : [];
+      const paths = changes.map((change) => stringValue(change.path)).filter((path) => Boolean(path));
+      return {
+        ...base,
+        kind: "write",
+        title: paths.length === 1 ? `Editing ${paths[0]}` : `Editing ${paths.length} files`,
+        ...paths.length > 0 ? { detail: paths.join(", ") } : {},
+        metadata: { changes: changes.map(({ path, kind }) => ({ path, kind })) }
+      };
+    }
+    case "mcpToolCall":
+      return {
+        ...base,
+        kind: "tool",
+        title: `${stringValue(item.server) ?? "MCP"} \xB7 ${stringValue(item.tool) ?? "tool"}`
+      };
+    case "dynamicToolCall":
+      return {
+        ...base,
+        kind: "tool",
+        title: [stringValue(item.namespace), stringValue(item.tool)].filter(Boolean).join(" \xB7 ") || "Tool call"
+      };
+    case "collabAgentToolCall":
+      return {
+        ...base,
+        kind: "tool",
+        title: `Agent \xB7 ${stringValue(item.tool) ?? "collaboration"}`,
+        ...stringValue(item.prompt) ? { detail: stringValue(item.prompt) } : {},
+        metadata: { receiverThreadIds: item.receiverThreadIds }
+      };
+    case "subAgentActivity":
+      return {
+        ...base,
+        kind: "message",
+        title: `Subagent ${stringValue(item.kind) ?? "activity"}`,
+        detail: stringValue(item.agentPath) ?? stringValue(item.agentThreadId)
+      };
+    case "agentMessage":
+      return {
+        ...base,
+        kind: "message",
+        title: "Agent message",
+        ...stringValue(item.text) ? { detail: stringValue(item.text)?.slice(0, 240) } : {}
+      };
+    case "webSearch":
+      return { ...base, kind: "tool", title: "Searching the web" };
+    case "imageView":
+      return { ...base, kind: "read", title: "Viewing image", detail: stringValue(item.path) };
+    case "imageGeneration":
+      return { ...base, kind: "tool", title: "Generating image" };
+    case "sleep":
+      return { ...base, kind: "tool", title: "Waiting on timer" };
+    case "contextCompaction":
+      return { ...base, kind: "thinking", title: "Compacting context" };
+    default:
+      return { ...base, kind: "unknown", title: stringValue(item.type) ?? "Unknown activity" };
+  }
+}
+function lifecycleEvents(item, at) {
+  if (item.type !== "collabAgentToolCall" || !isRecord(item.agentsStates)) return [];
+  const events = [];
+  for (const [threadId, state] of Object.entries(item.agentsStates)) {
+    if (!isRecord(state) || typeof state.status !== "string") continue;
+    const allowed = [
+      "pendingInit",
+      "running",
+      "interrupted",
+      "completed",
+      "errored",
+      "shutdown",
+      "notFound"
+    ];
+    if (!allowed.includes(state.status)) continue;
+    events.push({
+      type: "agent.lifecycle",
+      at,
+      threadId,
+      status: state.status,
+      ...stringValue(state.message) ? { message: stringValue(state.message) } : {}
+    });
+  }
+  return events;
+}
+function requestReason(method) {
+  if (method === "item/tool/requestUserInput") return { reason: "userInput", title: "Waiting for user input" };
+  if (method === "mcpServer/elicitation/request") return { reason: "elicitation", title: "Waiting for MCP input" };
+  if (method.includes("requestApproval") || method === "applyPatchApproval" || method === "execCommandApproval") {
+    return { reason: "approval", title: "Waiting for approval" };
+  }
+  return void 0;
+}
+function tokenUsage(value) {
+  if (!isRecord(value)) return {};
+  const total = isRecord(value.total) ? value.total : value;
+  return {
+    ...numberValue(total.inputTokens) !== void 0 ? { inputTokens: numberValue(total.inputTokens) } : {},
+    ...numberValue(total.cachedInputTokens) !== void 0 ? { cachedInputTokens: numberValue(total.cachedInputTokens) } : {},
+    ...numberValue(total.outputTokens) !== void 0 ? { outputTokens: numberValue(total.outputTokens) } : {},
+    ...numberValue(total.reasoningOutputTokens) !== void 0 ? { reasoningOutputTokens: numberValue(total.reasoningOutputTokens) } : {},
+    ...numberValue(total.totalTokens) !== void 0 ? { totalTokens: numberValue(total.totalTokens) } : {},
+    ...numberValue(value.modelContextWindow) !== void 0 ? { modelContextWindow: numberValue(value.modelContextWindow) } : {}
+  };
+}
+function normalizeEnvelope(envelope, at = Date.now()) {
+  const method = envelope.method;
+  const params = isRecord(envelope.params) ? envelope.params : {};
+  if (!method) return [];
+  const request = requestReason(method);
+  if (request && envelope.id !== void 0) {
+    const threadId = stringValue(params.threadId);
+    if (!threadId) return [];
+    const pending = {
+      id: String(envelope.id),
+      agentId: threadId,
+      reason: request.reason,
+      title: request.title,
+      ...stringValue(params.reason) ? { detail: stringValue(params.reason) } : {},
+      openedAt: numberValue(params.startedAtMs) ?? at
+    };
+    return [
+      { type: "request.opened", at, request: pending },
+      {
+        type: "activity.started",
+        at,
+        activity: {
+          id: `request:${pending.id}`,
+          agentId: threadId,
+          kind: "approval",
+          title: pending.title,
+          ...pending.detail ? { detail: pending.detail } : {},
+          startedAt: pending.openedAt
+        }
+      }
+    ];
+  }
+  switch (method) {
+    case "thread/started": {
+      const thread = toThreadSnapshot(params.thread);
+      return thread ? [{ type: "thread.discovered", at, thread }] : [];
+    }
+    case "thread/status/changed": {
+      const threadId = stringValue(params.threadId);
+      return threadId ? [{ type: "thread.status", at, threadId, status: statusValue(params.status) }] : [];
+    }
+    case "turn/started": {
+      const turn = isRecord(params.turn) ? params.turn : {};
+      const threadId = stringValue(params.threadId);
+      const turnId = stringValue(turn.id);
+      return threadId && turnId ? [{ type: "turn.started", at, threadId, turnId }] : [];
+    }
+    case "turn/completed": {
+      const turn = isRecord(params.turn) ? params.turn : {};
+      const threadId = stringValue(params.threadId);
+      const turnId = stringValue(turn.id);
+      const status = stringValue(turn.status);
+      if (!threadId || !turnId || !status || !["completed", "interrupted", "failed"].includes(status)) return [];
+      const error = isRecord(turn.error) ? stringValue(turn.error.message) : void 0;
+      return [{
+        type: "turn.completed",
+        at,
+        threadId,
+        turnId,
+        status,
+        ...error ? { error } : {}
+      }];
+    }
+    case "item/started":
+    case "item/completed": {
+      const item = isRecord(params.item) ? params.item : void 0;
+      const threadId = stringValue(params.threadId);
+      if (!item || !threadId) return [];
+      const completed = method === "item/completed";
+      const activity = activityFromItem(item, threadId, at, completed);
+      const activityEvent = completed ? {
+        type: "activity.completed",
+        at,
+        threadId,
+        activityId: activity.id,
+        activity,
+        ...activity.outcome ? { outcome: activity.outcome } : {}
+      } : { type: "activity.started", at, activity };
+      return [activityEvent, ...lifecycleEvents(item, at)];
+    }
+    case "serverRequest/resolved": {
+      const requestId = params.requestId;
+      if (typeof requestId !== "string" && typeof requestId !== "number") return [];
+      return [{
+        type: "request.resolved",
+        at,
+        requestId: String(requestId),
+        ...stringValue(params.threadId) ? { threadId: stringValue(params.threadId) } : {}
+      }];
+    }
+    case "thread/tokenUsage/updated": {
+      const threadId = stringValue(params.threadId);
+      return threadId ? [{ type: "token.updated", at, threadId, usage: tokenUsage(params.tokenUsage) }] : [];
+    }
+    case "error": {
+      const threadId = stringValue(params.threadId);
+      const error = isRecord(params.error) ? params.error : {};
+      if (!threadId) return [];
+      return [{
+        type: "activity.completed",
+        at,
+        threadId,
+        activityId: `error:${stringValue(params.turnId) ?? at}`,
+        activity: {
+          id: `error:${stringValue(params.turnId) ?? at}`,
+          agentId: threadId,
+          kind: "error",
+          title: "Codex error",
+          detail: stringValue(error.message) ?? "Unknown Codex error",
+          startedAt: at,
+          completedAt: at,
+          outcome: "failed"
+        },
+        outcome: "failed"
+      }];
+    }
+    default:
+      return [];
+  }
+}
+function parseEnvelope(line) {
+  try {
+    const parsed = JSON.parse(line);
+    return isRecord(parsed) ? parsed : void 0;
+  } catch {
+    return void 0;
+  }
+}
+
+// apps/server/src/codex-adapter.ts
+var ALL_SOURCE_KINDS = [
+  "cli",
+  "vscode",
+  "exec",
+  "appServer",
+  "subAgent",
+  "subAgentReview",
+  "subAgentCompact",
+  "subAgentThreadSpawn",
+  "subAgentOther",
+  "unknown"
+];
+function messageFromError(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value !== null && "message" in value && typeof value.message === "string") {
+    return value.message;
+  }
+  return "Unknown App Server error";
+}
+var RealCodexAdapter = class {
+  mode = "codex";
+  #listeners = /* @__PURE__ */ new Set();
+  #child;
+  #pending = /* @__PURE__ */ new Map();
+  #nextId = 1;
+  #connected = false;
+  #closing = false;
+  #reconnectTimer;
+  #attempt = 0;
+  #experimental = true;
+  #strategy = "experimental-descendants";
+  #codexVersion = "unknown";
+  runtimeInfo() {
+    return {
+      adapter: "codex",
+      observatoryVersion: "0.1.0",
+      codexCliVersion: this.#codexVersion,
+      protocolGenerationVersion: "0.149.0",
+      experimentalApi: this.#experimental,
+      discoveryStrategy: this.#strategy
+    };
+  }
+  async connect() {
+    this.#closing = false;
+    await this.#open();
+  }
+  async disconnect() {
+    this.#closing = true;
+    this.#connected = false;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = void 0;
+    this.#child?.kill("SIGTERM");
+    this.#child = void 0;
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("App Server disconnected"));
+    }
+    this.#pending.clear();
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: { phase: "disconnected", attempt: this.#attempt, message: "Disconnected" }
+    });
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  async listThreads(options) {
+    if (options?.rootThreadId && this.#experimental) {
+      try {
+        const descendants = await this.#pageThreads({ ancestorThreadId: options.rootThreadId });
+        this.#strategy = "experimental-descendants";
+        return descendants;
+      } catch (error) {
+        this.#experimental = false;
+        this.#strategy = "compatibility";
+        this.#emit({ type: "runtime.updated", at: Date.now(), runtime: this.runtimeInfo() });
+        this.#debug("connection", "Experimental descendant discovery unavailable; using compatibility mode", error);
+      }
+    }
+    const threads = await this.#pageThreads({});
+    if (!options?.rootThreadId) return threads;
+    const ids = /* @__PURE__ */ new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const thread of threads) {
+        if (thread.parentThreadId === options.rootThreadId || thread.parentThreadId && ids.has(thread.parentThreadId)) {
+          if (!ids.has(thread.id)) {
+            ids.add(thread.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    return threads.filter((thread) => ids.has(thread.id));
+  }
+  async listLoadedThreads() {
+    const result = await this.#request("thread/loaded/list", {});
+    if (!result || typeof result !== "object" || !("data" in result) || !Array.isArray(result.data)) return [];
+    return result.data.filter((id) => typeof id === "string");
+  }
+  async readThread(threadId, options) {
+    const result = await this.#request("thread/read", {
+      threadId,
+      includeTurns: options?.includeTurns ?? false
+    });
+    const thread = result && typeof result === "object" && "thread" in result ? toThreadSnapshot(result.thread) : void 0;
+    if (!thread) throw new Error(`Invalid thread/read response for ${threadId}`);
+    return thread;
+  }
+  async #open() {
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: {
+        phase: this.#attempt === 0 ? "connecting" : "reconnecting",
+        attempt: this.#attempt,
+        message: "Connecting to Codex App Server"
+      }
+    });
+    const version = spawnSync("codex", ["--version"], { encoding: "utf8" });
+    this.#codexVersion = version.stdout.trim().replace(/^codex-cli\s+/, "") || "unknown";
+    const transport = process.env.OBSERVATORY_CODEX_TRANSPORT ?? "standalone";
+    const args = transport === "proxy" ? ["app-server", "proxy"] : ["app-server"];
+    const child = spawn("codex", args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.#child = child;
+    const lines = readline.createInterface({ input: child.stdout });
+    lines.on("line", (line) => this.#onLine(line));
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString("utf8").trim();
+      if (text) this.#debug("protocol", text);
+    });
+    child.once("exit", (code, signal) => this.#onExit(code, signal));
+    try {
+      await this.#request("initialize", {
+        clientInfo: {
+          name: "codex_agent_observatory",
+          title: "Codex Agent Observatory",
+          version: "0.1.0"
+        },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false
+        }
+      });
+      this.#send({ method: "initialized", params: {} });
+      this.#connected = true;
+      this.#attempt = 0;
+      this.#emit({
+        type: "connection.changed",
+        at: Date.now(),
+        connection: {
+          phase: "connected",
+          attempt: 0,
+          message: args.at(-1) === "proxy" ? "Connected through App Server daemon" : "Connected to child App Server"
+        }
+      });
+      this.#emit({ type: "runtime.updated", at: Date.now(), runtime: this.runtimeInfo() });
+      await this.#refreshDiscovery();
+    } catch (error) {
+      child.kill("SIGTERM");
+      throw error;
+    }
+  }
+  async #refreshDiscovery() {
+    const rootThreadId = process.env.OBSERVATORY_ROOT_THREAD_ID;
+    const threads = rootThreadId ? [await this.readThread(rootThreadId), ...await this.listThreads({ rootThreadId })] : await this.listThreads();
+    for (const thread of threads) this.#emit({ type: "thread.discovered", at: Date.now(), thread });
+  }
+  async #pageThreads(extra) {
+    const all = [];
+    const configuredCwd = process.env.OBSERVATORY_CWD ?? process.env.INIT_CWD ?? process.cwd();
+    let cursor = null;
+    do {
+      const result = await this.#request("thread/list", {
+        ...extra,
+        cursor,
+        limit: 100,
+        sourceKinds: ALL_SOURCE_KINDS,
+        archived: false
+      });
+      if (!result || typeof result !== "object") break;
+      const data = "data" in result && Array.isArray(result.data) ? result.data : [];
+      for (const value of data) {
+        const thread = toThreadSnapshot(value);
+        if (thread) all.push(thread);
+      }
+      cursor = "nextCursor" in result && typeof result.nextCursor === "string" ? result.nextCursor : null;
+    } while (cursor);
+    return configuredCwd === "all" || "ancestorThreadId" in extra ? all : all.filter((thread) => thread.cwd === configuredCwd);
+  }
+  #request(method, params) {
+    const id = this.#nextId++;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`${method} timed out after 10 seconds`));
+      }, 1e4);
+      this.#pending.set(id, { resolve, reject, timeout });
+      try {
+        this.#send({ method, id, params });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.#pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+  #send(envelope) {
+    if (!this.#child?.stdin.writable) throw new Error("Codex App Server stdin is not writable");
+    this.#child.stdin.write(`${JSON.stringify(envelope)}
+`);
+    this.#debug("protocol", `\u2192 ${envelope.method ?? "response"}`, envelope, "out");
+  }
+  #onLine(line) {
+    const envelope = parseEnvelope(line);
+    if (!envelope) {
+      this.#debug("malformed", "Malformed JSONL message", line);
+      return;
+    }
+    this.#debug("protocol", `\u2190 ${envelope.method ?? "response"}`, envelope);
+    if (envelope.id !== void 0 && !envelope.method) {
+      const pending = this.#pending.get(envelope.id);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.#pending.delete(envelope.id);
+        if (envelope.error !== void 0) pending.reject(new Error(messageFromError(envelope.error)));
+        else pending.resolve(envelope.result);
+      }
+      return;
+    }
+    for (const event of normalizeEnvelope(envelope)) {
+      this.#emit(event);
+      this.#debug("normalized", event.type, event);
+    }
+  }
+  #onExit(code, signal) {
+    this.#connected = false;
+    this.#child = void 0;
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Codex App Server exited"));
+    }
+    this.#pending.clear();
+    if (this.#closing) return;
+    this.#attempt += 1;
+    const base = Math.min(15e3, 500 * 2 ** Math.min(this.#attempt - 1, 5));
+    const delay = base + Math.floor(Math.random() * Math.max(1, base * 0.2));
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: {
+        phase: "reconnecting",
+        attempt: this.#attempt,
+        message: `App Server exited (${code ?? signal ?? "unknown"})`,
+        nextRetryAt: Date.now() + delay
+      }
+    });
+    this.#reconnectTimer = setTimeout(() => {
+      void this.#open().catch((error) => {
+        this.#debug("connection", "Reconnect failed", error);
+      });
+    }, delay);
+  }
+  #emit(event) {
+    for (const listener of this.#listeners) listener(event);
+  }
+  #debug(category, summary, payload, direction = "in") {
+    this.#emit({
+      type: "debug",
+      at: Date.now(),
+      entry: {
+        id: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        at: Date.now(),
+        direction: category === "connection" ? "internal" : direction,
+        category,
+        summary,
+        ...payload !== void 0 ? { payload } : {}
+      }
+    });
+  }
+};
+
+// apps/server/src/mock-adapter.ts
+var active = (flags = []) => ({ type: "active", activeFlags: flags });
+function baseThread(id, nickname, role, nativeStatus, parentThreadId, depth = 0) {
+  const now = Date.now();
+  return {
+    id,
+    sessionId: "mock-session",
+    ...parentThreadId ? { parentThreadId } : {},
+    nickname,
+    role,
+    nativeStatus,
+    createdAt: now - Math.max(1, 7 - depth) * 42e3,
+    updatedAt: now,
+    cwd: "/projects/codex-agent-observatory",
+    model: depth === 0 ? "gpt-5.6-sol" : "gpt-5.6-terra",
+    modelProvider: "openai",
+    reasoningEffort: depth === 0 ? "high" : "medium",
+    observedSkills: depth === 0 ? [] : [`mock-${role}`],
+    observedWorkflows: ["Mock lifecycle"],
+    collaborationMode: "default",
+    source: parentThreadId ? { subAgent: { thread_spawn: { parent_thread_id: parentThreadId, depth } } } : "cli",
+    depth,
+    path: parentThreadId ? `/root/${nickname.toLowerCase()}` : "/root"
+  };
+}
+var MockCodexAdapter = class {
+  mode = "mock";
+  #scenario;
+  #threads = /* @__PURE__ */ new Map();
+  #listeners = /* @__PURE__ */ new Set();
+  #timers = [];
+  #connected = false;
+  constructor(scenario = "a") {
+    this.#scenario = scenario === "b" || scenario === "stress" ? scenario : "a";
+    const root = baseThread("mock-main", "Main", "root", active());
+    this.#threads.set(root.id, root);
+    if (this.#scenario === "b") this.#seedScenarioB();
+    if (this.#scenario === "stress") this.#seedStress();
+  }
+  runtimeInfo() {
+    return {
+      adapter: "mock",
+      observatoryVersion: "0.1.0",
+      protocolGenerationVersion: "0.149.0",
+      experimentalApi: false,
+      discoveryStrategy: "mock",
+      scenario: this.#scenario
+    };
+  }
+  async connect() {
+    if (this.#connected) return;
+    this.#connected = true;
+    for (const thread of this.#threads.values()) {
+      this.#emit({ type: "thread.discovered", at: Date.now(), thread });
+    }
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: { phase: "connected", attempt: 0, message: `Mock scenario ${this.#scenario.toUpperCase()}` }
+    });
+    if (this.#scenario === "a") this.#runScenarioA();
+    if (this.#scenario === "b") this.#runScenarioB();
+    if (this.#scenario === "stress") this.#runStress();
+  }
+  async disconnect() {
+    this.#connected = false;
+    for (const timer of this.#timers) clearTimeout(timer);
+    this.#timers = [];
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: { phase: "disconnected", attempt: 0, message: "Mock stream stopped" }
+    });
+  }
+  async listThreads(options) {
+    const threads = Array.from(this.#threads.values());
+    if (!options?.rootThreadId) return threads;
+    const descendants = /* @__PURE__ */ new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const thread of threads) {
+        if (thread.parentThreadId === options.rootThreadId || thread.parentThreadId && descendants.has(thread.parentThreadId)) {
+          if (!descendants.has(thread.id)) {
+            descendants.add(thread.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    return threads.filter((thread) => descendants.has(thread.id));
+  }
+  async listLoadedThreads() {
+    return Array.from(this.#threads.values()).filter((thread) => thread.nativeStatus.type !== "notLoaded").map((thread) => thread.id);
+  }
+  async readThread(threadId, _options) {
+    const thread = this.#threads.get(threadId);
+    if (!thread) throw new Error(`Mock thread not found: ${threadId}`);
+    return thread;
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  #emit(event) {
+    for (const listener of this.#listeners) listener(event);
+  }
+  #schedule(delay, action) {
+    this.#timers.push(setTimeout(() => this.#connected && action(), delay));
+  }
+  #discover(thread) {
+    this.#threads.set(thread.id, thread);
+    this.#emit({ type: "thread.discovered", at: Date.now(), thread });
+  }
+  #activity(agentId, id, kind, title, detail) {
+    const now = Date.now();
+    this.#emit({
+      type: "activity.started",
+      at: now,
+      activity: { id, agentId, kind, title, ...detail ? { detail } : {}, startedAt: now }
+    });
+  }
+  #runScenarioA() {
+    this.#schedule(500, () => {
+      this.#discover(baseThread("mock-researcher", "Researcher", "research", active(), "mock-main", 1));
+      this.#activity("mock-researcher", "research-web", "tool", "Searching Codex protocol", "thread/status/changed");
+    });
+    this.#schedule(1100, () => {
+      this.#discover(baseThread("mock-implementer", "Implementer", "implementation", active(), "mock-main", 1));
+      this.#activity("mock-implementer", "edit-store", "write", "Editing AgentStore.ts", "packages/core/AgentStore.ts");
+    });
+    this.#schedule(3e3, () => {
+      this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-researcher", status: "completed" });
+      this.#emit({
+        type: "activity.completed",
+        at: Date.now(),
+        threadId: "mock-researcher",
+        activityId: "research-web",
+        outcome: "completed"
+      });
+    });
+    this.#schedule(3800, () => {
+      this.#discover(baseThread("mock-tester", "Tester", "testing", active(), "mock-main", 1));
+      this.#activity("mock-tester", "run-tests", "test", "Running vitest", "npm test");
+    });
+    this.#schedule(5100, () => {
+      this.#emit({
+        type: "request.opened",
+        at: Date.now(),
+        request: {
+          id: "mock-approval",
+          agentId: "mock-tester",
+          reason: "approval",
+          title: "Waiting for approval",
+          detail: "Run browser outside sandbox",
+          openedAt: Date.now()
+        }
+      });
+    });
+    this.#schedule(8e3, () => {
+      this.#emit({ type: "request.resolved", at: Date.now(), requestId: "mock-approval", threadId: "mock-tester" });
+      this.#activity("mock-tester", "browser-e2e", "test", "Running Playwright", "mock runtime lifecycle");
+    });
+    this.#schedule(10500, () => {
+      this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-tester", status: "completed" });
+      this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-implementer", status: "completed" });
+    });
+  }
+  #seedScenarioB() {
+    const entries = [
+      baseThread("mock-frontend", "Frontend", "frontend", active(), "mock-main", 1),
+      baseThread("mock-test", "Test", "testing", active(), "mock-frontend", 2),
+      baseThread("mock-backend", "Backend", "backend", { type: "idle" }, "mock-main", 1),
+      baseThread("mock-reviewer", "Reviewer", "review", { type: "systemError" }, "mock-main", 1)
+    ];
+    for (const entry of entries) this.#threads.set(entry.id, entry);
+  }
+  #runScenarioB() {
+    this.#schedule(300, () => this.#activity("mock-frontend", "front-edit", "write", "Editing Dashboard.tsx"));
+    this.#schedule(700, () => this.#activity("mock-test", "test-unit", "test", "Running component tests"));
+    this.#schedule(
+      1200,
+      () => this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-backend", status: "completed" })
+    );
+    this.#schedule(
+      1400,
+      () => this.#activity("mock-reviewer", "review-error", "error", "Review failed", "Malformed tool response")
+    );
+  }
+  #seedStress() {
+    for (let index = 1; index <= 35; index += 1) {
+      const parent = index <= 6 ? "mock-main" : `mock-agent-${(index - 1) % 6 + 1}`;
+      const status = index % 7 === 0 ? { type: "idle" } : active();
+      const thread = baseThread(`mock-agent-${index}`, `Agent ${index}`, index % 3 === 0 ? "testing" : "worker", status, parent, index <= 6 ? 1 : 2);
+      this.#threads.set(thread.id, thread);
+    }
+  }
+  #runStress() {
+    let tick = 0;
+    const timer = setInterval(() => {
+      if (!this.#connected) return;
+      tick += 1;
+      const index = tick % 35 + 1;
+      const threadId = `mock-agent-${index}`;
+      const waiting = tick % 5 === 0;
+      this.#emit({
+        type: "thread.status",
+        at: Date.now(),
+        threadId,
+        status: waiting ? active(["waitingOnUserInput"]) : active()
+      });
+      this.#activity(threadId, `stress-${tick}`, tick % 3 === 0 ? "test" : "command", tick % 3 === 0 ? "Running tests" : "Running command", `task ${tick}`);
+    }, 900);
+    this.#timers.push(timer);
+  }
+};
+
+// apps/server/src/shared-state-adapter.ts
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  readlinkSync,
+  statSync,
+  watch
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
+var ROOT_COMMANDS = /* @__PURE__ */ new Set([
+  "agents",
+  "app-server",
+  "apply",
+  "archive",
+  "cloud",
+  "completion",
+  "debug",
+  "delete",
+  "doctor",
+  "exec",
+  "exec-server",
+  "features",
+  "fork",
+  "login",
+  "logout",
+  "mcp",
+  "mcp-server",
+  "plugin",
+  "queue",
+  "remote-control",
+  "review",
+  "sandbox",
+  "unarchive",
+  "update"
+]);
+var ACTIVITY_LIMIT_PER_THREAD = 30;
+var GLOBAL_ACTIVITY_LIMIT = 300;
+var SAFETY_REFRESH_MS = 15e3;
+var ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024;
+var SEEN_ACTIVITY_LIMIT = 3e3;
+function numberValue2(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return Number(value);
+  return void 0;
+}
+function stringValue2(value) {
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function jsonRecord(line) {
+  try {
+    const value = JSON.parse(line);
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function recordValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function timestampValue(value) {
+  if (typeof value !== "string") return void 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : void 0;
+}
+function activityTitle(name) {
+  switch (name) {
+    case "exec":
+      return { kind: "command", title: "Running command" };
+    case "spawn_agent":
+      return { kind: "tool", title: "Spawning agent" };
+    case "wait_agent":
+      return { kind: "tool", title: "Waiting for agents" };
+    case "send_message":
+    case "followup_task":
+      return { kind: "message", title: "Messaging agent" };
+    case "list_agents":
+      return { kind: "tool", title: "Checking agent status" };
+    case "request_user_input":
+      return { kind: "approval", title: "Waiting for user input" };
+    default:
+      return { kind: "tool", title: name.replaceAll("_", " ") || "Tool call" };
+  }
+}
+function skillNameFromPath(path) {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.at(-1) !== "SKILL.md") return void 0;
+  const name = parts.at(-2);
+  if (!name || name === "skills") return void 0;
+  const skillsIndex = parts.lastIndexOf("skills");
+  const pluginName = skillsIndex >= 2 && parts[skillsIndex - 1]?.match(/^\d+\.\d+/) ? parts[skillsIndex - 2] : void 0;
+  return pluginName && pluginName !== ".system" ? `${pluginName}:${name}` : name;
+}
+function executionContextFromToolInput(input, toolName) {
+  let command = "";
+  const parsed = jsonRecord(input);
+  if (parsed && typeof parsed.cmd === "string") {
+    command = parsed.cmd;
+  } else {
+    const commandLiterals = [...input.matchAll(/(?:^|[,{\s])["']?cmd["']?\s*:\s*("(?:\\.|[^"\\])*")/gs)];
+    if (commandLiterals.length > 0) {
+      for (const match of commandLiterals) {
+        try {
+          const decoded = JSON.parse(match[1] ?? "");
+          if (typeof decoded === "string") command += `${command ? "\n" : ""}${decoded}`;
+        } catch {
+        }
+      }
+    } else if (/^\s*(?:rtk\s+(?:proxy\s+)?)?(?:cat|sed|head|tail|less|bat|rg)\b/.test(input)) {
+      command = input;
+    }
+  }
+  const skills = /* @__PURE__ */ new Set();
+  const workflows = /* @__PURE__ */ new Set();
+  const readsFiles = toolName === "exec" && /(?:^|&&|\|\||;|\n)\s*(?:rtk\s+(?:proxy\s+)?)?(?:cat|sed|head|tail|less|bat|rg)\b/m.test(command);
+  if (readsFiles) {
+    for (const match of command.matchAll(/[A-Za-z0-9_@.+~/-]+\/SKILL\.md\b/g)) {
+      const name = skillNameFromPath(match[0]);
+      if (name) skills.add(name);
+    }
+  }
+  if (readsFiles && (/(?:^|[\s"'])\.sdd\//m.test(command) || /\/\.sdd\//.test(command))) workflows.add("SDD");
+  for (const skill of skills) {
+    if (skill.startsWith("sdd-")) workflows.add("SDD");
+  }
+  if (toolName === "update_plan") workflows.add("Planning");
+  if (toolName === "create_goal" || toolName === "update_goal") workflows.add("Goal tracking");
+  return { skills: [...skills], workflows: [...workflows] };
+}
+function parseRolloutState(text, threadId, isRoot, processActive) {
+  let taskStartedAt;
+  let taskCompletedAt;
+  let interruptedAt;
+  let workItemAt;
+  let lastEventAt;
+  let model;
+  let reasoningEffort;
+  let collaborationMode;
+  const observedSkills = /* @__PURE__ */ new Set();
+  const observedWorkflows = /* @__PURE__ */ new Set();
+  const openCalls = /* @__PURE__ */ new Map();
+  const completedActivities = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    const envelope = jsonRecord(line);
+    if (!envelope) continue;
+    const at = timestampValue(envelope.timestamp);
+    if (at !== void 0) lastEventAt = Math.max(lastEventAt ?? at, at);
+    const payload = recordValue(envelope.payload);
+    if (!payload) continue;
+    if (envelope.type === "turn_context") {
+      if (typeof payload.model === "string" && payload.model.length > 0) model = payload.model;
+      if (typeof payload.effort === "string" && payload.effort.length > 0) reasoningEffort = payload.effort;
+      const mode = recordValue(payload.collaboration_mode);
+      if (typeof mode?.mode === "string" && mode.mode.length > 0) collaborationMode = mode.mode;
+      if (collaborationMode === "plan") observedWorkflows.add("Planning");
+      continue;
+    }
+    if (envelope.type === "event_msg") {
+      if (payload.type === "task_started" && at !== void 0) taskStartedAt = at;
+      if (payload.type === "task_complete" && at !== void 0) taskCompletedAt = at;
+      if (payload.type === "turn_aborted" && at !== void 0) interruptedAt = at;
+      continue;
+    }
+    if (envelope.type !== "response_item" || at === void 0) continue;
+    workItemAt = at;
+    const itemType = typeof payload.type === "string" ? payload.type : "";
+    if (itemType === "custom_tool_call" || itemType === "function_call") {
+      const callId = typeof payload.call_id === "string" ? payload.call_id : `${threadId}:${at}`;
+      const name = typeof payload.name === "string" ? payload.name : "tool";
+      const input = typeof payload.input === "string" ? payload.input : typeof payload.arguments === "string" ? payload.arguments : "";
+      const context = executionContextFromToolInput(input, name);
+      context.skills.forEach((skill) => observedSkills.add(skill));
+      context.workflows.forEach((workflow) => observedWorkflows.add(workflow));
+      const mapped = activityTitle(name);
+      openCalls.set(callId, {
+        id: callId,
+        agentId: threadId,
+        kind: mapped.kind,
+        title: mapped.title,
+        detail: name,
+        startedAt: at
+      });
+      continue;
+    }
+    if (itemType === "custom_tool_call_output" || itemType === "function_call_output") {
+      const callId = typeof payload.call_id === "string" ? payload.call_id : void 0;
+      const activity = callId ? openCalls.get(callId) : void 0;
+      if (activity) {
+        completedActivities.push({ ...activity, completedAt: at, outcome: "completed" });
+        openCalls.delete(activity.id);
+      }
+      continue;
+    }
+    if (itemType === "message") {
+      completedActivities.push({
+        id: `message:${threadId}:${at}`,
+        agentId: threadId,
+        kind: "message",
+        title: "Agent message",
+        startedAt: at,
+        completedAt: at,
+        outcome: "completed"
+      });
+    }
+  }
+  const latestTerminalAt = Math.max(taskCompletedAt ?? 0, interruptedAt ?? 0);
+  const explicitWorking = (taskStartedAt ?? 0) > latestTerminalAt;
+  const activeRootWork = isRoot && processActive && (workItemAt ?? 0) > latestTerminalAt;
+  const isWorking = explicitWorking || activeRootWork;
+  const waitingOnUserInput = [...openCalls.values()].some((activity) => activity.detail === "request_user_input");
+  let nativeStatus;
+  let lifecycle;
+  if (isWorking) {
+    nativeStatus = {
+      type: "active",
+      activeFlags: waitingOnUserInput ? ["waitingOnUserInput"] : []
+    };
+    lifecycle = "running";
+  } else if (interruptedAt !== void 0 && interruptedAt >= (taskCompletedAt ?? 0)) {
+    nativeStatus = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
+    lifecycle = "interrupted";
+  } else if (taskCompletedAt !== void 0) {
+    nativeStatus = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
+    if (!isRoot) lifecycle = "completed";
+  } else {
+    nativeStatus = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
+  }
+  const activities = [...completedActivities, ...openCalls.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-ACTIVITY_LIMIT_PER_THREAD);
+  return {
+    nativeStatus,
+    ...lifecycle ? { lifecycle } : {},
+    ...lastEventAt ? { lastEventAt } : {},
+    ...model ? { model } : {},
+    ...reasoningEffort ? { reasoningEffort } : {},
+    observedSkills: [...observedSkills].sort(),
+    observedWorkflows: [...observedWorkflows].sort(),
+    ...collaborationMode ? { collaborationMode } : {},
+    activities
+  };
+}
+function readRolloutTail(path) {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - ROLLOUT_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    readSync(fd, buffer, 0, buffer.length, start);
+    const text = buffer.toString("utf8");
+    if (start === 0) return text;
+    const firstNewline = text.indexOf("\n");
+    return firstNewline === -1 ? "" : text.slice(firstNewline + 1);
+  } finally {
+    closeSync(fd);
+  }
+}
+function latestVersionedDatabase(codexHome, prefix) {
+  const matches = readdirSync(codexHome).filter((name) => new RegExp(`^${prefix}_[0-9]+\\.sqlite$`).test(name)).sort((a, b) => {
+    const aVersion = Number(a.match(/_([0-9]+)\.sqlite$/)?.[1] ?? 0);
+    const bVersion = Number(b.match(/_([0-9]+)\.sqlite$/)?.[1] ?? 0);
+    return bVersion - aVersion;
+  });
+  return matches[0] ? join(codexHome, matches[0]) : void 0;
+}
+function findInteractiveCodexCwds(procRoot = "/proc") {
+  const result = /* @__PURE__ */ new Map();
+  let entries;
+  try {
+    entries = readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry));
+  } catch {
+    return result;
+  }
+  for (const pid of entries) {
+    try {
+      const command = readFileSync(join(procRoot, pid, "cmdline"), "utf8").split("\0").filter(Boolean);
+      if (command.length === 0 || basename(command[0] ?? "") !== "codex") continue;
+      const subcommand = command.slice(1).find((value) => !value.startsWith("-"));
+      if (subcommand && ROOT_COMMANDS.has(subcommand)) continue;
+      const cwd = readlinkSync(join(procRoot, pid, "cwd"));
+      if (!cwd) continue;
+      result.set(cwd, (result.get(cwd) ?? 0) + 1);
+    } catch {
+    }
+  }
+  return result;
+}
+function rowSnapshot(row, rollout) {
+  const id = stringValue2(row.id);
+  if (!id) return void 0;
+  const createdAt = numberValue2(row.created_at_ms) ?? ((numberValue2(row.created_at) ?? 0) * 1e3 || void 0);
+  const updatedAt = rollout.lastEventAt ?? numberValue2(row.updated_at_ms) ?? ((numberValue2(row.updated_at) ?? 0) * 1e3 || void 0);
+  return {
+    id,
+    ...stringValue2(row.parent_thread_id) ? { parentThreadId: stringValue2(row.parent_thread_id) } : {},
+    ...stringValue2(row.agent_nickname) ? { nickname: stringValue2(row.agent_nickname) } : {},
+    ...stringValue2(row.agent_role) ? { role: stringValue2(row.agent_role) } : {},
+    nativeStatus: rollout.nativeStatus,
+    ...createdAt ? { createdAt } : {},
+    ...updatedAt ? { updatedAt } : {},
+    ...stringValue2(row.cwd) ? { cwd: stringValue2(row.cwd) } : {},
+    ...rollout.model ? { model: rollout.model } : {},
+    ...stringValue2(row.model_provider) ? { modelProvider: stringValue2(row.model_provider) } : {},
+    ...rollout.reasoningEffort ? { reasoningEffort: rollout.reasoningEffort } : {},
+    observedSkills: rollout.observedSkills,
+    observedWorkflows: rollout.observedWorkflows,
+    ...rollout.collaborationMode ? { collaborationMode: rollout.collaborationMode } : {},
+    ...stringValue2(row.thread_source) ? { source: row.thread_source } : {},
+    ...stringValue2(row.agent_path) ? { path: stringValue2(row.agent_path) } : {}
+  };
+}
+var SharedStateCodexAdapter = class {
+  mode = "codex";
+  #listeners = /* @__PURE__ */ new Set();
+  #db;
+  #threads = /* @__PURE__ */ new Map();
+  #watchers = [];
+  #refreshTimer;
+  #safetyTimer;
+  #connected = false;
+  #refreshing = false;
+  #refreshQueued = false;
+  #codexVersion = "unknown";
+  #seenActivities = /* @__PURE__ */ new Set();
+  #seenActivityOrder = [];
+  #lastLifecycle = /* @__PURE__ */ new Map();
+  #lastThreadFingerprint = /* @__PURE__ */ new Map();
+  #rolloutCache = /* @__PURE__ */ new Map();
+  runtimeInfo() {
+    return {
+      adapter: "codex",
+      observatoryVersion: "0.1.0",
+      codexCliVersion: this.#codexVersion,
+      protocolGenerationVersion: "0.149.0",
+      experimentalApi: false,
+      discoveryStrategy: "compatibility"
+    };
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  async connect() {
+    if (this.#connected) return;
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: { phase: "connecting", attempt: 0, message: "Connecting to shared Codex state" }
+    });
+    const version = spawnSync2("codex", ["--version"], { encoding: "utf8" });
+    this.#codexVersion = version.stdout.trim().replace(/^codex-cli\s+/, "") || "unknown";
+    const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+    const stateDbPath = latestVersionedDatabase(codexHome, "state");
+    if (!stateDbPath) throw new Error(`Codex state database was not found in ${codexHome}`);
+    this.#db = new DatabaseSync(stateDbPath, { readOnly: true });
+    await this.#refresh();
+    this.#connected = true;
+    this.#emit({ type: "runtime.updated", at: Date.now(), runtime: this.runtimeInfo() });
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: {
+        phase: "connected",
+        attempt: 0,
+        message: "Connected \xB7 shared Codex compatibility mode"
+      }
+    });
+    this.#startWatching(codexHome);
+  }
+  async disconnect() {
+    this.#connected = false;
+    if (this.#refreshTimer) clearTimeout(this.#refreshTimer);
+    if (this.#safetyTimer) clearInterval(this.#safetyTimer);
+    this.#refreshTimer = void 0;
+    this.#safetyTimer = void 0;
+    for (const watcher of this.#watchers) watcher.close();
+    this.#watchers = [];
+    this.#db?.close();
+    this.#db = void 0;
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: { phase: "disconnected", attempt: 0, message: "Disconnected" }
+    });
+  }
+  async listThreads(options) {
+    const values = [...this.#threads.values()].map((thread) => thread.snapshot);
+    if (!options?.rootThreadId) return values;
+    const descendants = /* @__PURE__ */ new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const thread of values) {
+        if (thread.parentThreadId === options.rootThreadId || thread.parentThreadId && descendants.has(thread.parentThreadId)) {
+          if (!descendants.has(thread.id)) {
+            descendants.add(thread.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    return values.filter((thread) => descendants.has(thread.id));
+  }
+  async listLoadedThreads() {
+    return [...this.#threads.values()].filter((thread) => thread.snapshot.nativeStatus.type !== "notLoaded").map((thread) => thread.snapshot.id);
+  }
+  async readThread(threadId, _options) {
+    const thread = this.#threads.get(threadId)?.snapshot;
+    if (!thread) throw new Error(`Unknown shared Codex thread ${threadId}`);
+    return thread;
+  }
+  #startWatching(codexHome) {
+    const schedule = () => this.#scheduleRefresh();
+    try {
+      this.#watchers.push(watch(codexHome, (_event, file) => {
+        if (!file || String(file).startsWith("state_")) schedule();
+      }));
+    } catch (error) {
+      this.#debug("Unable to watch Codex state database", error);
+    }
+    const sessions = join(codexHome, "sessions");
+    if (existsSync(sessions)) {
+      try {
+        this.#watchers.push(watch(sessions, { recursive: true }, (_event, file) => {
+          if (!file || String(file).endsWith(".jsonl")) schedule();
+        }));
+      } catch (error) {
+        this.#debug("Unable to watch Codex session events", error);
+      }
+    }
+    this.#safetyTimer = setInterval(schedule, SAFETY_REFRESH_MS);
+  }
+  #scheduleRefresh() {
+    if (!this.#connected) return;
+    if (this.#refreshTimer) clearTimeout(this.#refreshTimer);
+    this.#refreshTimer = setTimeout(() => {
+      this.#refreshTimer = void 0;
+      void this.#refresh().catch((error) => this.#debug("Shared state refresh failed", error));
+    }, 150);
+  }
+  async #refresh() {
+    if (this.#refreshing) {
+      this.#refreshQueued = true;
+      return;
+    }
+    this.#refreshing = true;
+    try {
+      const db = this.#db;
+      if (!db) return;
+      const rows = db.prepare(`
+        SELECT t.*, e.parent_thread_id
+        FROM threads t
+        LEFT JOIN thread_spawn_edges e ON e.child_thread_id = t.id
+        WHERE t.archived = 0
+        ORDER BY t.updated_at_ms DESC
+      `).all();
+      const processCwds = findInteractiveCodexCwds();
+      const configuredCwd = process.env.OBSERVATORY_CWD ?? "all";
+      const rootOverride = process.env.OBSERVATORY_ROOT_THREAD_ID;
+      const roots = rows.filter((row) => !stringValue2(row.parent_thread_id));
+      const selectedRoots = /* @__PURE__ */ new Set();
+      if (rootOverride) {
+        selectedRoots.add(rootOverride);
+      } else {
+        for (const [cwd, count] of processCwds) {
+          if (configuredCwd !== "all" && cwd !== configuredCwd) continue;
+          for (const row of roots.filter((candidate) => candidate.cwd === cwd).slice(0, count)) {
+            const id = stringValue2(row.id);
+            if (id) selectedRoots.add(id);
+          }
+        }
+      }
+      const selected = new Set(selectedRoots);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of rows) {
+          const id = stringValue2(row.id);
+          const parentId = stringValue2(row.parent_thread_id);
+          if (id && parentId && selected.has(parentId) && !selected.has(id)) {
+            selected.add(id);
+            changed = true;
+          }
+        }
+      }
+      const next = /* @__PURE__ */ new Map();
+      for (const row of rows) {
+        const id = stringValue2(row.id);
+        const cwd = stringValue2(row.cwd);
+        if (!id || !selected.has(id)) continue;
+        const rolloutPath = stringValue2(row.rollout_path);
+        if (!rolloutPath || !existsSync(rolloutPath)) continue;
+        const isRoot = !stringValue2(row.parent_thread_id);
+        const file = statSync(rolloutPath);
+        const cached = this.#rolloutCache.get(rolloutPath);
+        const rollout = cached && cached.size === file.size && cached.mtimeMs === file.mtimeMs ? cached.state : parseRolloutState(
+          readRolloutTail(rolloutPath),
+          id,
+          isRoot,
+          Boolean(cwd && processCwds.has(cwd))
+        );
+        this.#rolloutCache.set(rolloutPath, { size: file.size, mtimeMs: file.mtimeMs, state: rollout });
+        const snapshot = rowSnapshot(row, rollout);
+        if (!snapshot) continue;
+        next.set(id, { snapshot, rolloutPath, rollout });
+      }
+      this.#threads = next;
+      const activePaths = new Set([...next.values()].map((thread) => thread.rolloutPath));
+      for (const path of this.#rolloutCache.keys()) {
+        if (!activePaths.has(path)) this.#rolloutCache.delete(path);
+      }
+      for (const thread of next.values()) this.#projectThread(thread);
+      const activities = [...next.values()].flatMap((thread) => thread.rollout.activities).sort((a, b) => a.startedAt - b.startedAt).slice(-GLOBAL_ACTIVITY_LIMIT);
+      for (const activity of activities) this.#projectActivity(activity);
+    } finally {
+      this.#refreshing = false;
+      if (this.#refreshQueued) {
+        this.#refreshQueued = false;
+        this.#scheduleRefresh();
+      }
+    }
+  }
+  #projectThread(thread) {
+    const at = thread.rollout.lastEventAt ?? Date.now();
+    const fingerprint = JSON.stringify(thread.snapshot);
+    if (this.#lastThreadFingerprint.get(thread.snapshot.id) !== fingerprint) {
+      this.#lastThreadFingerprint.set(thread.snapshot.id, fingerprint);
+      this.#emit({ type: "thread.discovered", at, thread: thread.snapshot });
+    }
+    const lifecycle = thread.rollout.lifecycle;
+    if (lifecycle && this.#lastLifecycle.get(thread.snapshot.id) !== lifecycle) {
+      this.#lastLifecycle.set(thread.snapshot.id, lifecycle);
+      this.#emit({ type: "agent.lifecycle", at, threadId: thread.snapshot.id, status: lifecycle });
+      if (lifecycle === "running") {
+        this.#emit({ type: "thread.status", at, threadId: thread.snapshot.id, status: thread.snapshot.nativeStatus });
+      }
+    }
+  }
+  #projectActivity(activity) {
+    const key = `${activity.id}:${activity.completedAt ?? "open"}`;
+    if (this.#seenActivities.has(key)) return;
+    this.#rememberActivity(key);
+    if (activity.completedAt !== void 0) {
+      this.#emit({
+        type: "activity.completed",
+        at: activity.completedAt,
+        threadId: activity.agentId,
+        activityId: activity.id,
+        activity,
+        outcome: activity.outcome
+      });
+    } else {
+      this.#emit({ type: "activity.started", at: activity.startedAt, activity });
+    }
+  }
+  #rememberActivity(key) {
+    this.#seenActivities.add(key);
+    this.#seenActivityOrder.push(key);
+    while (this.#seenActivityOrder.length > SEEN_ACTIVITY_LIMIT) {
+      const oldest = this.#seenActivityOrder.shift();
+      if (oldest) this.#seenActivities.delete(oldest);
+    }
+  }
+  #emit(event) {
+    for (const listener of this.#listeners) listener(event);
+  }
+  #debug(summary, payload) {
+    this.#emit({
+      type: "debug",
+      at: Date.now(),
+      entry: {
+        id: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        at: Date.now(),
+        direction: "internal",
+        category: "connection",
+        summary,
+        ...payload !== void 0 ? { payload: payload instanceof Error ? payload.message : payload } : {}
+      }
+    });
+  }
+};
+
+// apps/server/src/index.ts
+var port = Number(process.env.OBSERVATORY_PORT ?? 4317);
+var realTransport = process.env.OBSERVATORY_CODEX_TRANSPORT ?? "shared";
+var adapter = process.env.OBSERVATORY_ADAPTER === "codex" ? realTransport === "shared" ? new SharedStateCodexAdapter() : new RealCodexAdapter() : new MockCodexAdapter(process.env.OBSERVATORY_SCENARIO ?? "a");
+var store = new ObservatoryStore(adapter.runtimeInfo());
+var clients = /* @__PURE__ */ new Set();
+adapter.subscribe((event) => store.apply(event));
+store.subscribe((snapshot, event) => {
+  const payload = JSON.stringify({ type: "snapshot", snapshot, event });
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
+  }
+});
+var webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
+var contentTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".json": "application/json; charset=utf-8"
+};
+var server = createServer((request, response) => {
+  const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  if (requestUrl.pathname === "/api/health") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true, connection: store.snapshot().connection }));
+    return;
+  }
+  if (requestUrl.pathname === "/api/snapshot") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(store.snapshot()));
+    return;
+  }
+  if (requestUrl.pathname === "/api/retry" && request.method === "POST") {
+    void adapter.connect().catch((error) => {
+      const event = {
+        type: "connection.changed",
+        at: Date.now(),
+        connection: { phase: "disconnected", attempt: 0, message: error instanceof Error ? error.message : String(error) }
+      };
+      store.apply(event);
+    });
+    response.writeHead(202).end();
+    return;
+  }
+  if (!existsSync2(webDist)) {
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "Web build not found. Run the Vite development server." }));
+    return;
+  }
+  const relative = requestUrl.pathname === "/" ? "index.html" : requestUrl.pathname.slice(1);
+  const candidate = normalize(join2(webDist, relative));
+  const safePath = candidate.startsWith(webDist) && existsSync2(candidate) ? candidate : join2(webDist, "index.html");
+  response.writeHead(200, { "content-type": contentTypes[extname(safePath)] ?? "application/octet-stream" });
+  createReadStream(safePath).pipe(response);
+});
+var webSockets = new WebSocketServer({ server, path: "/ws" });
+webSockets.on("connection", (socket) => {
+  clients.add(socket);
+  socket.send(JSON.stringify({ type: "snapshot", snapshot: store.snapshot() }));
+  socket.on("close", () => clients.delete(socket));
+  socket.on("message", (message) => {
+    try {
+      const parsed = JSON.parse(message.toString());
+      if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "retry") {
+        void adapter.connect();
+      }
+    } catch {
+    }
+  });
+});
+server.listen(port, "127.0.0.1", () => {
+  console.log(`Codex Agent Observatory server: http://127.0.0.1:${port}`);
+  console.log(`Adapter: ${adapter.mode}`);
+});
+void adapter.connect().catch((error) => {
+  store.apply({
+    type: "connection.changed",
+    at: Date.now(),
+    connection: {
+      phase: "disconnected",
+      attempt: 0,
+      message: error instanceof Error ? error.message : String(error)
+    }
+  });
+});
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    void adapter.disconnect().finally(() => server.close(() => process.exit(0)));
+  });
+}
