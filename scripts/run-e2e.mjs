@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 const serverPort = process.env.OBSERVATORY_E2E_SERVER_PORT ?? "4417";
 const webPort = process.env.OBSERVATORY_E2E_WEB_PORT ?? "4418";
 const webUrl = `http://127.0.0.1:${webPort}`;
+const stripAnsi = (value) => value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
 
 const dev = spawn("npm", ["run", "dev"], {
   cwd: process.cwd(),
@@ -33,7 +34,7 @@ const stopDev = () => {
 const ready = new Promise((resolve, reject) => {
   const timeout = setTimeout(() => reject(new Error(`Development servers did not start:\n${output}`)), 20_000);
   const consume = (chunk) => {
-    const text = chunk.toString("utf8");
+    const text = stripAnsi(chunk.toString("utf8"));
     output += text;
     if (!settled && output.includes(`Local:   ${webUrl}`) && /Observatory server:/.test(output)) {
       settled = true;
