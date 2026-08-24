@@ -1,0 +1,74 @@
+name: Bug report
+description: Report reproducible behavior that is incorrect or unexpected.
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Please remove sensitive Codex prompts, paths, and tokens from logs before submitting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+      placeholder: A concise description of the problem and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest reliable sequence that demonstrates the problem.
+      placeholder: |
+        1. Start Observatory with ...
+        2. Run Codex with ...
+        3. Open ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the operating system and the output of the relevant version commands.
+      render: shell
+      placeholder: |
+        node --version
+        npm --version
+        codex --version
+        npx agent-observatory --version
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Observatory mode
+      options:
+        - Mock mode
+        - Real mode
+        - Both
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or screenshots
+      description: Attach sanitized logs, Debug panel output, or screenshots that help explain the failure.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any related issue links, workarounds, or frequency information.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed secrets and sensitive project data from the report.
+          required: true

@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose a concrete improvement to Agent Observatory.
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or workflow limitation should this solve?
+      placeholder: Describe the current difficulty without prescribing a solution first.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behavior or interface you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note any workarounds or other designs you considered.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Agent discovery and server
+        - Dashboard and interaction
+        - Codex protocol compatibility
+        - CLI and packaging
+        - CI/CD and project maintenance
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: Acceptance criteria
+      description: What observable outcomes would make this request complete?
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: This request is focused on one user problem.
+          required: true

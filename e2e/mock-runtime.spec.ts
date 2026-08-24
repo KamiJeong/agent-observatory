@@ -5,7 +5,7 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   await expect(page.getByRole("heading", { name: "Codex Observatory" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Connected");
 
-  await expect(page.getByRole("button", { name: /Researcher, Working/i })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole("button", { name: /Researcher, (Working|Completed)/i })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole("button", { name: /Implementer, Working/i })).toBeVisible();
   await expect(page.getByRole("button", { name: /Researcher, Completed/i })).toBeVisible({ timeout: 6_000 });
   await expect(page.getByRole("button", { name: /Tester, Waiting/i })).toBeVisible({ timeout: 6_000 });

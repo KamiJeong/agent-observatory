@@ -218,6 +218,10 @@ npm run test:e2e
 npm run build
 ```
 
+Contributions use short-lived branches and pull requests into `main`. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch, review, CI, and npm release
+workflow.
+
 After `npm run build`, the local backend can serve the production web bundle:
 
 ```bash
