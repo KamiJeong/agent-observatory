@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/observatory-core" },
+    { "path": "./packages/codex-protocol" },
+    { "path": "./apps/server" },
+    { "path": "./apps/web" }
+  ]
+}

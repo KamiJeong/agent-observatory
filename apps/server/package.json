@@ -1,0 +1,15 @@
+{
+  "name": "@observatory/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@observatory/codex-protocol": "0.1.0",
+    "@observatory/core": "0.1.0",
+    "ws": "^8.18.3"
+  }
+}
