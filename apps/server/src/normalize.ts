@@ -93,7 +93,7 @@ export function toThreadSnapshot(value: unknown): ThreadSnapshot | undefined {
 }
 
 function commandLooksLikeTest(command: string): boolean {
-  return /(^|\s)(vitest|jest|pytest|go test|cargo test|npm (run )?test|pnpm (run )?test|bun test)(\s|$)/i.test(
+  return /(^|\s)(vitest|jest|pytest|go test|cargo test|npm (run )?test|pnpm (run )?test|bun (run )?test)(\s|$)/i.test(
     command,
   );
 }
