@@ -1,0 +1,33 @@
+name: Question or support request
+description: Ask for help using or configuring Agent Observatory.
+title: "[Question]: "
+labels:
+  - question
+  - needs-triage
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe the desired outcome and relevant setup.
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Include commands and sanitized output where useful.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, Node.js, Codex, and Observatory versions when relevant.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked the README and existing issues first.
+          required: true

@@ -1,0 +1,19 @@
+[
+  { "name": "bug", "color": "D73A4A", "description": "Something is not working" },
+  { "name": "enhancement", "color": "A2EEEF", "description": "New feature or improvement" },
+  { "name": "documentation", "color": "0075CA", "description": "Documentation changes" },
+  { "name": "question", "color": "D876E3", "description": "Usage or support question" },
+  { "name": "needs-triage", "color": "FBCA04", "description": "Needs initial review and classification" },
+  { "name": "priority: critical", "color": "B60205", "description": "Urgent issue blocking normal use or release" },
+  { "name": "priority: high", "color": "D93F0B", "description": "Important issue to address soon" },
+  { "name": "priority: medium", "color": "FBCA04", "description": "Normal priority work" },
+  { "name": "priority: low", "color": "C5DEF5", "description": "Useful but not time-sensitive" },
+  { "name": "area: server", "color": "1D76DB", "description": "Server, adapters, discovery, or CLI runtime" },
+  { "name": "area: web", "color": "5319E7", "description": "Dashboard UI or browser behavior" },
+  { "name": "area: protocol", "color": "0E8A16", "description": "Codex protocol bindings or normalization" },
+  { "name": "area: ci/cd", "color": "0052CC", "description": "Automation, testing, packaging, or releases" },
+  { "name": "dependencies", "color": "0366D6", "description": "Dependency updates" },
+  { "name": "release", "color": "006B75", "description": "Package version and release preparation" },
+  { "name": "breaking change", "color": "B60205", "description": "Requires a major-version release or migration" },
+  { "name": "skip-changelog", "color": "EDEDED", "description": "Exclude from generated release notes" }
+]

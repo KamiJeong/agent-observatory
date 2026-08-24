@@ -213,6 +213,9 @@ npm run test:e2e
 npm run build
 ```
 
+기여 작업은 단기 브랜치와 `main` 대상 Pull Request를 사용합니다. 브랜치, 리뷰,
+CI 및 npm 릴리스 절차는 [`CONTRIBUTING.md`](CONTRIBUTING.md)를 참고하세요.
+
 `npm run build` 후에는 로컬 백엔드에서 프로덕션 웹 번들을 제공할 수 있습니다.
 
 ```bash
