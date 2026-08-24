@@ -5,7 +5,7 @@ const webPort = process.env.OBSERVATORY_E2E_WEB_PORT ?? "4418";
 const webUrl = `http://127.0.0.1:${webPort}`;
 const stripAnsi = (value) => value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
 
-const dev = spawn("npm", ["run", "dev"], {
+const dev = spawn("bun", ["run", "dev"], {
   cwd: process.cwd(),
   env: {
     ...process.env,
@@ -51,7 +51,7 @@ const ready = new Promise((resolve, reject) => {
 
 try {
   await ready;
-  const test = spawn("npx", ["playwright", "test"], {
+  const test = spawn("bunx", ["playwright", "test"], {
     cwd: process.cwd(),
     env: { ...process.env, OBSERVATORY_WEB_URL: webUrl },
     stdio: "inherit",

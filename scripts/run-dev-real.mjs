@@ -18,9 +18,7 @@ for (let index = 2; index < process.argv.length; index += 1) {
   env[environmentName] = value;
   index += 1;
 }
-const command = process.platform === "win32"
-  ? { file: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", "npm run dev"] }
-  : { file: "npm", args: ["run", "dev"] };
+const command = { file: "bun", args: ["run", "dev"] };
 const child = spawn(command.file, command.args, { env, stdio: "inherit" });
 
 child.once("error", (error) => {

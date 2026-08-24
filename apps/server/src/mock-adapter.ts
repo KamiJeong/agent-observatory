@@ -182,7 +182,7 @@ export class MockCodexAdapter implements CodexAdapter {
     });
     this.#schedule(3_800, () => {
       this.#discover(baseThread("mock-tester", "Tester", "testing", active(), "mock-main", 1));
-      this.#activity("mock-tester", "run-tests", "test", "Running vitest", "npm test");
+      this.#activity("mock-tester", "run-tests", "test", "Running vitest", "bun run test");
     });
     this.#schedule(5_100, () => {
       this.#emit({
