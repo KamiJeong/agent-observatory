@@ -22,7 +22,7 @@ import {
   readlinkSync
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename as basename2, join as join2 } from "node:path";
+import { basename as basename2, dirname, join as join2 } from "node:path";
 
 // apps/server/src/claude-team-observer.ts
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -649,9 +649,13 @@ function applyClaudeTeamEvidence(observed, teams, cwdFilter) {
   const results = [...observed];
   const sessionThreads = /* @__PURE__ */ new Map();
   for (const thread of results) {
-    if (thread.snapshot.sessionId) sessionThreads.set(thread.snapshot.sessionId, thread);
+    if (thread.snapshot.sessionId && !thread.snapshot.parentThreadId) {
+      sessionThreads.set(thread.snapshot.sessionId, thread);
+    }
   }
   for (const team of teams) {
+    const observedTeamSession = team.members.some((member) => Boolean(member.sessionId && sessionThreads.has(member.sessionId))) || Boolean(team.leadSessionId && sessionThreads.has(team.leadSessionId));
+    if (!observedTeamSession) continue;
     const hasMatchingCwd = cwdFilter === "all" || team.members.some((member) => member.cwd === cwdFilter) || (team.leadSessionId ? sessionThreads.get(team.leadSessionId)?.snapshot.cwd === cwdFilter : false);
     if (!hasMatchingCwd) continue;
     const leadMember = team.members.find((member) => member.kind === "teamLead");
@@ -763,8 +767,40 @@ function looksLikeInteractiveClaude(command) {
   const commandName = args.find((arg) => !arg.startsWith("-"));
   return !commandName || !nonInteractive.has(commandName);
 }
+function rootTranscriptPath(path2) {
+  const cleaned = path2.replace(/ \(deleted\)$/, "");
+  const parent = dirname(cleaned);
+  if (basename2(parent) !== "subagents") return cleaned;
+  const sessionDir = dirname(parent);
+  return join2(dirname(sessionDir), `${basename2(sessionDir)}.jsonl`);
+}
+function samePath(left, right) {
+  const normalize = (value) => value.replace(/\/+$/, "") || "/";
+  return normalize(left) === normalize(right);
+}
+function selectActiveClaudeTranscriptPaths(candidates, discovery, cwdFilter) {
+  const eligible = candidates.filter((candidate) => cwdFilter === "all" || Boolean(candidate.cwd && samePath(candidate.cwd, cwdFilter))).sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+  const openPaths = discovery.openRootTranscriptPaths ?? /* @__PURE__ */ new Set();
+  const selected = /* @__PURE__ */ new Set();
+  for (const [cwd, count] of discovery.cwdCounts) {
+    const matching = eligible.filter((candidate) => candidate.cwd && samePath(candidate.cwd, cwd));
+    const exact = matching.filter((candidate) => openPaths.has(candidate.path)).slice(0, count);
+    for (const candidate of exact) selected.add(candidate.path);
+    for (const candidate of matching.filter((candidate2) => !selected.has(candidate2.path)).slice(0, count - exact.length)) {
+      selected.add(candidate.path);
+    }
+  }
+  if (!discovery.exact) {
+    const unresolvedCount = Math.max(0, discovery.processCount - selected.size);
+    for (const candidate of eligible.filter((candidate2) => !selected.has(candidate2.path)).slice(0, unresolvedCount)) {
+      selected.add(candidate.path);
+    }
+  }
+  return selected;
+}
 function findInteractiveClaudeCwds(procRoot = "/proc") {
   const cwdCounts = /* @__PURE__ */ new Map();
+  const openRootTranscriptPaths = /* @__PURE__ */ new Set();
   let processCount = 0;
   let entries;
   try {
@@ -775,6 +811,7 @@ function findInteractiveClaudeCwds(procRoot = "/proc") {
       processCount,
       exact: false,
       source: "unsupported",
+      openRootTranscriptPaths,
       warning: "Claude process discovery requires procfs on this platform"
     };
   }
@@ -785,10 +822,19 @@ function findInteractiveClaudeCwds(procRoot = "/proc") {
       processCount += 1;
       const cwd = readlinkSync(join2(procRoot, pid, "cwd"));
       if (cwd) cwdCounts.set(cwd, (cwdCounts.get(cwd) ?? 0) + 1);
+      try {
+        for (const fd of readdirSync2(join2(procRoot, pid, "fd"))) {
+          const target = readlinkSync(join2(procRoot, pid, "fd", fd));
+          if (target.replace(/ \(deleted\)$/, "").endsWith(".jsonl")) {
+            openRootTranscriptPaths.add(rootTranscriptPath(target));
+          }
+        }
+      } catch {
+      }
     } catch {
     }
   }
-  return { cwdCounts, processCount, exact: true, source: "procfs" };
+  return { cwdCounts, processCount, exact: true, source: "procfs", openRootTranscriptPaths };
 }
 function cliVersion() {
   const result = spawnSync("claude", ["--version"], { encoding: "utf8", timeout: 5e3 });
@@ -800,6 +846,7 @@ var ClaudeCodeAdapter = class {
   mode = "claude";
   #listeners = /* @__PURE__ */ new Set();
   #threads = /* @__PURE__ */ new Map();
+  #emittedThreads = /* @__PURE__ */ new Map();
   #seenActivities = /* @__PURE__ */ new Set();
   #seenHistory = /* @__PURE__ */ new Set();
   #seenRequests = /* @__PURE__ */ new Set();
@@ -900,13 +947,20 @@ var ClaudeCodeAdapter = class {
   }
   async #refresh(emit) {
     const processDiscovery = this.#processDiscovery();
-    const observed = this.#scanTranscripts(processDiscovery.cwdCounts);
+    const observed = this.#scanTranscripts(processDiscovery);
     this.#threads = new Map(observed.map((thread) => [thread.snapshot.id, thread]));
     if (!emit) return;
+    const observedIds = new Set(this.#threads.keys());
+    for (const [id, thread] of this.#emittedThreads) {
+      if (observedIds.has(id)) continue;
+      this.#forgetThreadEvidence(thread);
+      this.#emit({ type: "thread.removed", at: this.#now(), threadId: id });
+    }
     for (const thread of observed) this.#emitThread(thread);
+    this.#emittedThreads = new Map(observed.map((thread) => [thread.snapshot.id, thread]));
     if (processDiscovery.warning) this.#debug(processDiscovery.warning);
   }
-  #scanTranscripts(activeCwds) {
+  #scanTranscripts(processDiscovery) {
     const projectsRoot = join2(this.#claudeHome, "projects");
     let projectDirs;
     try {
@@ -914,7 +968,7 @@ var ClaudeCodeAdapter = class {
     } catch {
       projectDirs = [];
     }
-    const results = [];
+    const candidates = [];
     for (const projectDir of projectDirs) {
       let files;
       try {
@@ -932,67 +986,87 @@ var ClaudeCodeAdapter = class {
           continue;
         }
         const sessionId = this.#sessionId(rootTail.text) ?? fallbackSessionId;
-        const rootId = namespaceRoot(sessionId);
         const fallbackCwd = this.#transcriptCwd(rootTail.text);
-        if (this.#cwd !== "all" && fallbackCwd !== this.#cwd) continue;
-        const processActive = fallbackCwd ? (activeCwds.get(fallbackCwd) ?? 0) > 0 : false;
-        const root = parseClaudeTranscript(rootTail.text, {
-          threadId: rootId,
+        candidates.push({
+          path: path2,
+          projectDir,
           sessionId,
-          fallbackCwd,
-          isRoot: true,
-          processActive,
-          createdAt: rootTail.stat.birthtimeMs || void 0,
-          updatedAt: rootTail.stat.mtimeMs,
-          captureContent: this.#captureContent
+          rootTail,
+          ...fallbackCwd ? { cwd: fallbackCwd } : {},
+          updatedAt: rootTail.stat.mtimeMs
         });
-        results.push({ ...root, path: path2 });
-        const subagentsDir = join2(projectDir, sessionId, "subagents");
-        let agentFiles;
+      }
+    }
+    const selectedPaths = selectActiveClaudeTranscriptPaths(candidates, processDiscovery, this.#cwd);
+    const results = [];
+    for (const candidate of candidates) {
+      if (!selectedPaths.has(candidate.path)) continue;
+      const { path: path2, projectDir, sessionId, rootTail } = candidate;
+      const fallbackCwd = candidate.cwd;
+      const rootId = namespaceRoot(sessionId);
+      const processActive = true;
+      const root = parseClaudeTranscript(rootTail.text, {
+        threadId: rootId,
+        sessionId,
+        fallbackCwd,
+        isRoot: true,
+        processActive,
+        createdAt: rootTail.stat.birthtimeMs || void 0,
+        updatedAt: rootTail.stat.mtimeMs,
+        captureContent: this.#captureContent
+      });
+      results.push({ ...root, path: path2 });
+      const subagentsDir = join2(projectDir, sessionId, "subagents");
+      let agentFiles;
+      try {
+        agentFiles = readdirSync2(subagentsDir).filter((name) => name.startsWith("agent-") && name.endsWith(".jsonl"));
+      } catch {
+        continue;
+      }
+      const parsedAgents = [];
+      for (const agentFile of agentFiles) {
+        const agentPath = join2(subagentsDir, agentFile);
+        const nativeAgentId = agentFile.slice(0, -".jsonl".length);
+        const threadId = namespaceSubagent(sessionId, nativeAgentId);
+        let tail;
         try {
-          agentFiles = readdirSync2(subagentsDir).filter((name) => name.startsWith("agent-") && name.endsWith(".jsonl"));
+          tail = readTail(agentPath);
         } catch {
           continue;
         }
-        const parsedAgents = [];
-        for (const agentFile of agentFiles) {
-          const agentPath = join2(subagentsDir, agentFile);
-          const nativeAgentId = agentFile.slice(0, -".jsonl".length);
-          const threadId = namespaceSubagent(sessionId, nativeAgentId);
-          let tail;
-          try {
-            tail = readTail(agentPath);
-          } catch {
-            continue;
-          }
-          const meta = parseSubagentMeta(join2(subagentsDir, `${nativeAgentId}.meta.json`));
-          const parsed = parseClaudeTranscript(tail.text, {
-            threadId,
-            sessionId,
-            parentThreadId: rootId,
-            fallbackCwd,
-            isRoot: false,
-            processActive,
-            createdAt: tail.stat.birthtimeMs || void 0,
-            updatedAt: tail.stat.mtimeMs,
-            meta,
-            captureContent: this.#captureContent
-          });
-          parsedAgents.push({ observed: { ...parsed, path: agentPath }, meta });
-        }
-        const toolOwner = /* @__PURE__ */ new Map();
-        for (const id of root.toolUseIds) toolOwner.set(id, rootId);
-        for (const { observed } of parsedAgents) {
-          for (const id of observed.toolUseIds) toolOwner.set(id, observed.snapshot.id);
-        }
-        for (const { observed, meta } of parsedAgents) {
-          const parent = meta?.toolUseId ? toolOwner.get(meta.toolUseId) : void 0;
-          if (parent && parent !== observed.snapshot.id) observed.snapshot.parentThreadId = parent;
-          results.push(observed);
-        }
+        const meta = parseSubagentMeta(join2(subagentsDir, `${nativeAgentId}.meta.json`));
+        const parsed = parseClaudeTranscript(tail.text, {
+          threadId,
+          sessionId,
+          parentThreadId: rootId,
+          fallbackCwd,
+          isRoot: false,
+          processActive,
+          createdAt: tail.stat.birthtimeMs || void 0,
+          updatedAt: tail.stat.mtimeMs,
+          meta,
+          captureContent: this.#captureContent
+        });
+        parsedAgents.push({ observed: { ...parsed, path: agentPath }, meta });
+      }
+      const toolOwner = /* @__PURE__ */ new Map();
+      for (const id of root.toolUseIds) toolOwner.set(id, rootId);
+      for (const { observed } of parsedAgents) {
+        for (const id of observed.toolUseIds) toolOwner.set(id, observed.snapshot.id);
+      }
+      for (const { observed, meta } of parsedAgents) {
+        const parent = meta?.toolUseId ? toolOwner.get(meta.toolUseId) : void 0;
+        if (parent && parent !== observed.snapshot.id) observed.snapshot.parentThreadId = parent;
+        results.push(observed);
       }
     }
     return applyClaudeTeamEvidence(results, discoverClaudeAgentTeams(this.#claudeHome), this.#cwd);
+  }
+  #forgetThreadEvidence(thread) {
+    for (const activity of thread.activities) this.#seenActivities.delete(activity.id);
+    for (const history of thread.history) this.#seenHistory.delete(history.id);
+    for (const request of thread.pendingRequests) this.#seenRequests.delete(request.id);
+    this.#lifecycle.delete(thread.snapshot.id);
   }
   #sessionId(text) {
     for (const line of text.split("\n")) {
@@ -1278,6 +1352,33 @@ function reduceEvent(state, event, limits = {
           relationKind: "spawn"
         }, historyLimit);
       }
+      break;
+    }
+    case "thread.removed": {
+      const removedIds = /* @__PURE__ */ new Set([event.threadId]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const agent of Object.values(state.agents)) {
+          if (agent.parentId && removedIds.has(agent.parentId) && !removedIds.has(agent.id)) {
+            removedIds.add(agent.id);
+            changed = true;
+          }
+        }
+      }
+      next.agents = rebuildChildren(Object.fromEntries(
+        Object.entries(state.agents).filter(([id]) => !removedIds.has(id))
+      ));
+      next.activities = state.activities.filter((activity) => !removedIds.has(activity.agentId));
+      next.history = state.history.filter((history) => {
+        const actorRemoved = history.actor.type === "agent" && Boolean(history.actor.id && removedIds.has(history.actor.id));
+        const recipientRemoved = (history.recipients ?? []).some((recipient) => recipient.type === "agent" && Boolean(recipient.id && removedIds.has(recipient.id)));
+        return !actorRemoved && !recipientRemoved;
+      });
+      next.pendingRequests = Object.fromEntries(
+        Object.entries(state.pendingRequests).filter(([, request]) => !removedIds.has(request.agentId))
+      );
+      if (state.selectedAgentId && removedIds.has(state.selectedAgentId)) next.selectedAgentId = void 0;
       break;
     }
     case "thread.status": {
@@ -1633,6 +1734,7 @@ function namespaceRuntimeEvent(provider, event) {
   switch (event.type) {
     case "thread.discovered":
       return { ...event, provider, thread: namespaceThreadSnapshot(provider, event.thread) };
+    case "thread.removed":
     case "thread.status":
     case "agent.lifecycle":
     case "token.updated":
@@ -3795,15 +3897,15 @@ function pathKey(value, platform) {
   }
   return value.replace(/\/+$/, "") || "/";
 }
-function samePath(left, right, platform) {
+function samePath2(left, right, platform) {
   return pathKey(left, platform) === pathKey(right, platform);
 }
 function selectRootThreadIds(roots, discovery, configuredCwd, rootOverride, platform = process.platform) {
   if (rootOverride) return /* @__PURE__ */ new Set([rootOverride]);
-  const eligible = configuredCwd === "all" ? roots : roots.filter((root) => root.cwd && samePath(root.cwd, configuredCwd, platform));
+  const eligible = configuredCwd === "all" ? roots : roots.filter((root) => root.cwd && samePath2(root.cwd, configuredCwd, platform));
   const selected = /* @__PURE__ */ new Set();
   for (const [cwd, count] of discovery.cwdCounts) {
-    for (const root of eligible.filter((candidate) => candidate.cwd && samePath(candidate.cwd, cwd, platform)).slice(0, count)) {
+    for (const root of eligible.filter((candidate) => candidate.cwd && samePath2(candidate.cwd, cwd, platform)).slice(0, count)) {
       selected.add(root.id);
     }
   }

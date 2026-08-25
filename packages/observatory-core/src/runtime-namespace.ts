@@ -101,6 +101,7 @@ export function namespaceRuntimeEvent(
   switch (event.type) {
     case "thread.discovered":
       return { ...event, provider, thread: namespaceThreadSnapshot(provider, event.thread) };
+    case "thread.removed":
     case "thread.status":
     case "agent.lifecycle":
     case "token.updated":

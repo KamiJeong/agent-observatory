@@ -232,8 +232,8 @@ In particular, `notLoaded` and `thread/closed` never imply completion.
 | Codex | Linux / WSL2 | Reads interactive process cwd values from `/proc` | Supported; locally verified on WSL2 Linux |
 | Codex | macOS | Finds processes with `ps` and resolves cwd values with `lsof` | Implemented; native-device verification pending |
 | Codex | Windows | Uses PowerShell CIM; honors `-C`/`--cd`, otherwise selects recent Codex state | Implemented; native-device verification pending |
-| Claude | Linux / WSL2 | Uses procfs cwd discovery plus bounded transcript and Agent Teams compatibility evidence | Supported; locally verified on WSL2 Linux |
-| Claude | macOS / Windows | Uses transcript-only historical discovery without exact live process mapping | Compatibility fallback; native-device verification pending |
+| Claude | Linux / WSL2 | Matches active processes to open transcripts when available, otherwise selects the newest root per process and cwd | Supported; locally verified on WSL2 Linux |
+| Claude | macOS / Windows | Live process mapping is not implemented; historical transcripts are not loaded into the live graph | Compatibility limited; native-device implementation pending |
 
 Codex and Observatory must run in the same OS environment and use the same
 `CODEX_HOME`. For example, a native Windows Observatory cannot discover Codex
@@ -403,12 +403,14 @@ they are not claimed as supported until bindings are regenerated and tests pass.
 ## Real Claude Code Mode
 
 Claude observation is a version-aware, read-only compatibility adapter. It
-discovers active working directories on Linux and reads bounded root/subagent
-transcript tails plus Agent Teams beta config, task, and mailbox metadata. It
-does not retain prompts, responses, thinking, commands, tool input, task text,
-or mailbox content. Other platforms currently use transcript-only historical
-discovery. Official hooks and OpenTelemetry remain planned accuracy
-enhancements. See [Claude compatibility](docs/claude-compatibility.md) for the
+discovers active working directories on Linux, prefers transcript files held
+open by each Claude process, and falls back to the newest root transcript per
+process and cwd. Only selected roots, their subagents, and anchored Agent Teams
+members enter the live graph; closed historical sessions remain untouched on
+disk and are not loaded. Bounded request and final-response text follows the
+content-capture policy, while thinking, commands, tool input/results, task text,
+and mailbox content remain excluded. Official hooks and OpenTelemetry remain
+planned accuracy enhancements. See [Claude compatibility](docs/claude-compatibility.md) for the
 evidence, privacy, and version boundaries.
 
 ## Protocol generation

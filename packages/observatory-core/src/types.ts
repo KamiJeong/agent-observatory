@@ -255,6 +255,7 @@ export type AgentLifecycleStatus =
 
 type RuntimeEvent =
   | { type: "thread.discovered"; at: number; thread: ThreadSnapshot }
+  | { type: "thread.removed"; at: number; threadId: string }
   | {
       type: "thread.status";
       at: number;

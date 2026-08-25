@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,7 @@ import {
   ClaudeCodeAdapter,
   findInteractiveClaudeCwds,
   parseClaudeTranscript,
+  selectActiveClaudeTranscriptPaths,
 } from "./claude-adapter.ts";
 import {
   discoverClaudeAgentTeams,
@@ -121,6 +122,50 @@ describe("Claude process discovery", () => {
     const discovered = findInteractiveClaudeCwds(procRoot);
     expect(discovered.processCount).toBe(1);
     expect(discovered.cwdCounts).toEqual(new Map([["/workspace/one", 1]]));
+  });
+
+  it("resolves an open subagent transcript to its root transcript", () => {
+    const procRoot = temporaryDirectory();
+    const processDir = join(procRoot, "101");
+    const subagentPath = join(procRoot, "projects", "demo", "session-1", "subagents", "agent-a1.jsonl");
+    mkdirSync(join(processDir, "fd"), { recursive: true });
+    writeFileSync(join(processDir, "cmdline"), "/usr/bin/claude\0");
+    symlinkSync("/workspace/demo", join(processDir, "cwd"));
+    symlinkSync(subagentPath, join(processDir, "fd", "7"));
+
+    const discovered = findInteractiveClaudeCwds(procRoot);
+
+    expect(discovered.openRootTranscriptPaths).toEqual(new Set([
+      join(procRoot, "projects", "demo", "session-1.jsonl"),
+    ]));
+  });
+
+  it("prefers exact open transcripts and otherwise selects the newest N roots per active cwd", () => {
+    const candidates = [
+      { path: "/transcripts/old.jsonl", cwd: "/workspace/demo", updatedAt: 10 },
+      { path: "/transcripts/new.jsonl", cwd: "/workspace/demo", updatedAt: 30 },
+      { path: "/transcripts/middle.jsonl", cwd: "/workspace/demo", updatedAt: 20 },
+      { path: "/transcripts/other.jsonl", cwd: "/workspace/other", updatedAt: 40 },
+    ];
+    expect(selectActiveClaudeTranscriptPaths(candidates, {
+      cwdCounts: new Map([["/workspace/demo", 1]]),
+      processCount: 1,
+      exact: true,
+      source: "procfs",
+      openRootTranscriptPaths: new Set(["/transcripts/old.jsonl"]),
+    }, "all")).toEqual(new Set(["/transcripts/old.jsonl"]));
+    expect(selectActiveClaudeTranscriptPaths(candidates, {
+      cwdCounts: new Map([["/workspace/demo", 2]]),
+      processCount: 2,
+      exact: true,
+      source: "procfs",
+    }, "all")).toEqual(new Set(["/transcripts/new.jsonl", "/transcripts/middle.jsonl"]));
+    expect(selectActiveClaudeTranscriptPaths(candidates, {
+      cwdCounts: new Map(),
+      processCount: 1,
+      exact: false,
+      source: "unsupported",
+    }, "/workspace/demo")).toEqual(new Set(["/transcripts/new.jsonl"]));
   });
 });
 
@@ -257,6 +302,38 @@ describe("Claude adapter", () => {
     await expect(explicitlyRestricted.listThreads()).resolves.toEqual([]);
   });
 
+  it("shows only the newest root for one active process and keeps its subagents", async () => {
+    const claudeHome = temporaryDirectory();
+    const projectDir = join(claudeHome, "projects", "-workspace-demo");
+    const oldRoot = join(projectDir, "session-old.jsonl");
+    const activeRoot = join(projectDir, "session-active.jsonl");
+    write(oldRoot, fixture("root.jsonl").replaceAll("session-1", "session-old"));
+    write(activeRoot, fixture("root.jsonl").replaceAll("session-1", "session-active"));
+    write(join(projectDir, "session-active", "subagents", "agent-a1.jsonl"), fixture("subagent.jsonl")
+      .replaceAll("session-1", "session-active"));
+    write(join(projectDir, "session-active", "subagents", "agent-a1.meta.json"), fixture("subagent.meta.json"));
+    utimesSync(oldRoot, new Date(1_000), new Date(1_000));
+    utimesSync(activeRoot, new Date(2_000), new Date(2_000));
+    const adapter = new ClaudeCodeAdapter({
+      claudeHome,
+      cwd: "/workspace/demo",
+      processDiscovery: () => ({
+        cwdCounts: new Map([["/workspace/demo", 1]]),
+        processCount: 1,
+        exact: true,
+        source: "procfs",
+      }),
+    });
+
+    const threads = await adapter.listThreads();
+
+    expect(threads.map((thread) => thread.id).sort()).toEqual([
+      "claude:session-active",
+      "claude:session-active:agent-a1",
+    ]);
+    expect(threads.every((thread) => thread.id !== "claude:session-old")).toBe(true);
+  });
+
   it("discovers a namespaced root and subagent with a mapped parent", async () => {
     const claudeHome = temporaryDirectory();
     const projectDir = join(claudeHome, "projects", "-workspace-demo");
@@ -297,7 +374,9 @@ describe("Claude adapter", () => {
       claudeHome,
       cwd: "/workspace/demo",
       pollIntervalMs: 60_000,
-      processDiscovery: () => ({ cwdCounts: new Map(), processCount: 0, exact: true, source: "procfs" }),
+      processDiscovery: () => ({
+        cwdCounts: new Map([["/workspace/demo", 1]]), processCount: 1, exact: true, source: "procfs",
+      }),
     });
     const events: AgentRuntimeEvent[] = [];
     adapter.subscribe((event) => events.push(event));
@@ -456,7 +535,7 @@ describe("Claude adapter", () => {
     expect(JSON.stringify({ threads, events })).not.toContain("private");
   });
 
-  it("keeps config-only teammates idle even when a persisted task says in progress", async () => {
+  it("ignores an unanchored persisted team when no active root transcript exists", async () => {
     const claudeHome = temporaryDirectory();
     const teamName = "session-stale1";
     write(join(claudeHome, "teams", teamName, "config.json"), JSON.stringify({
@@ -494,9 +573,37 @@ describe("Claude adapter", () => {
     });
 
     const threads = await adapter.listThreads();
-    expect(threads).toHaveLength(2);
-    expect(threads.every((thread) => thread.nativeStatus.type === "idle")).toBe(true);
+    expect(threads).toEqual([]);
     expect(JSON.stringify(threads)).not.toContain("private");
+  });
+
+  it("emits removal when the active Claude process exits", async () => {
+    const claudeHome = temporaryDirectory();
+    const projectDir = join(claudeHome, "projects", "-workspace-demo");
+    write(join(projectDir, "session-1.jsonl"), fixture("root.jsonl"));
+    let active = true;
+    const adapter = new ClaudeCodeAdapter({
+      claudeHome,
+      cwd: "/workspace/demo",
+      pollIntervalMs: 10,
+      processDiscovery: () => ({
+        cwdCounts: active ? new Map([["/workspace/demo", 1]]) : new Map(),
+        processCount: active ? 1 : 0,
+        exact: true,
+        source: "procfs",
+      }),
+    });
+    const events: AgentRuntimeEvent[] = [];
+    adapter.subscribe((event) => events.push(event));
+    await adapter.connect();
+    active = false;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await adapter.disconnect();
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "thread.removed",
+      threadId: "claude:session-1",
+    }));
   });
 });
 
