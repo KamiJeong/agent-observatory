@@ -19,6 +19,7 @@ export function resolveRuntimeConfiguration(values) {
       : values.provider === "all" || values.provider === undefined
         ? "codex,claude"
         : values.provider,
+    cwd: mock ? undefined : values.cwd ?? "all",
   };
 }
 

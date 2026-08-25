@@ -19,7 +19,7 @@ Options:
   --mock                 Run with deterministic local fixtures
   --provider <name>      codex, claude, or all (default: all)
   --port <number>        HTTP/WebSocket port (preferred default: 4317)
-  --cwd <path|all>       Restrict Real Mode to one working directory
+  --cwd <path|all>       Restrict Real Mode (default: all active workspaces)
   --root-thread <id>     Restrict Real Mode to one root thread tree
   --transport <mode>     shared, standalone, or proxy (default: shared)
   --scenario <name>      Mock scenario: a, b, demo, or stress (implies --mock)
@@ -122,7 +122,7 @@ if (port !== preferredPort) {
 process.env.OBSERVATORY_PORT = String(port);
 process.env.OBSERVATORY_ADAPTER = runtime.adapter;
 if (runtime.providers) process.env.OBSERVATORY_PROVIDERS = runtime.providers;
-if (values.cwd) process.env.OBSERVATORY_CWD = values.cwd;
+if (runtime.cwd) process.env.OBSERVATORY_CWD = runtime.cwd;
 if (values["root-thread"]) process.env.OBSERVATORY_ROOT_THREAD_ID = values["root-thread"];
 if (values.transport) process.env.OBSERVATORY_CODEX_TRANSPORT = values.transport;
 if (values.scenario) process.env.OBSERVATORY_SCENARIO = values.scenario;

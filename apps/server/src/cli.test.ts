@@ -30,11 +30,16 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<v
 
 describe("agent-observatory CLI", () => {
   it("defaults to Real Mode with Codex and Claude while preserving explicit Mock Mode", () => {
-    expect(resolveRuntimeConfiguration({})).toEqual({ adapter: "real", providers: "codex,claude" });
-    expect(resolveRuntimeConfiguration({ real: true })).toEqual({ adapter: "real", providers: "codex,claude" });
-    expect(resolveRuntimeConfiguration({ provider: "codex" })).toEqual({ adapter: "real", providers: "codex" });
-    expect(resolveRuntimeConfiguration({ mock: true })).toEqual({ adapter: "mock", providers: undefined });
-    expect(resolveRuntimeConfiguration({ scenario: "demo" })).toEqual({ adapter: "mock", providers: undefined });
+    expect(resolveRuntimeConfiguration({})).toEqual({ adapter: "real", providers: "codex,claude", cwd: "all" });
+    expect(resolveRuntimeConfiguration({ real: true })).toEqual({ adapter: "real", providers: "codex,claude", cwd: "all" });
+    expect(resolveRuntimeConfiguration({ provider: "codex" })).toEqual({ adapter: "real", providers: "codex", cwd: "all" });
+    expect(resolveRuntimeConfiguration({ cwd: "/projects/selected" })).toEqual({
+      adapter: "real",
+      providers: "codex,claude",
+      cwd: "/projects/selected",
+    });
+    expect(resolveRuntimeConfiguration({ mock: true })).toEqual({ adapter: "mock", providers: undefined, cwd: undefined });
+    expect(resolveRuntimeConfiguration({ scenario: "demo" })).toEqual({ adapter: "mock", providers: undefined, cwd: undefined });
     expect(() => resolveRuntimeConfiguration({ real: true, mock: true })).toThrow("Use either --real or --mock");
     expect(() => resolveRuntimeConfiguration({ real: true, scenario: "demo" })).toThrow("scenarios run in Mock Mode");
   });
