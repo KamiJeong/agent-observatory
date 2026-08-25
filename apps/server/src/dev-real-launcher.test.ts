@@ -9,7 +9,7 @@ const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url
 const launcherPath = join(repositoryRoot, "scripts", "run-dev-real.mjs");
 const temporaryDirectories: string[] = [];
 
-function runLauncher(args: string[] = [], providers?: string) {
+function runLauncher(args: string[] = [], providers?: string, captureContent?: string) {
   const binDirectory = mkdtempSync(join(tmpdir(), "observatory-launcher-"));
   temporaryDirectories.push(binDirectory);
   const fakeBun = join(binDirectory, "bun");
@@ -26,7 +26,8 @@ function runLauncher(args: string[] = [], providers?: string) {
   };
   if (providers === undefined) delete env.OBSERVATORY_PROVIDERS;
   else env.OBSERVATORY_PROVIDERS = providers;
-  delete env.OBSERVATORY_CAPTURE_CONTENT;
+  if (captureContent === undefined) delete env.OBSERVATORY_CAPTURE_CONTENT;
+  else env.OBSERVATORY_CAPTURE_CONTENT = captureContent;
   const result = spawnSync(process.execPath, [launcherPath, ...args], {
     cwd: repositoryRoot,
     env,
@@ -53,16 +54,29 @@ describe("dev:real launcher", () => {
       adapter: "real",
       launchCwd: repositoryRoot,
       cwdFilter: "",
-      captureContent: "",
+      captureContent: "1",
       args: "run dev",
     });
   });
 
-  it("enables bounded provider content with an explicit flag", () => {
-    const result = runLauncher(["--capture-content", "--no-open"]);
+  it("allows bounded provider content to be disabled explicitly", () => {
+    const result = runLauncher(["--no-capture-content", "--no-open"]);
 
     expect(result.status).toBe(0);
-    expect(result.payload?.captureContent).toBe("1");
+    expect(result.payload?.captureContent).toBe("0");
+  });
+
+  it("preserves an environment opt-out and lets the CLI override it", () => {
+    expect(runLauncher([], undefined, "0").payload?.captureContent).toBe("0");
+    expect(runLauncher(["--capture-content"], undefined, "0").payload?.captureContent).toBe("1");
+  });
+
+  it("rejects conflicting content-capture flags before starting Bun", () => {
+    const result = runLauncher(["--capture-content", "--no-capture-content"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Use either --capture-content or --no-capture-content");
+    expect(result.payload).toBeUndefined();
   });
 
   it.each(["codex", "claude", "codex,claude"])("preserves the explicit %s CLI provider override", (providers) => {
