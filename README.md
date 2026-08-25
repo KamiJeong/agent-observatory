@@ -134,9 +134,9 @@ bun run dev:real -- --cwd /absolute/path/to/project
 - **Provider Health & Filters**: Independent Codex/Claude health plus provider, workspace, session, status, and search filters
 - **Agent Graph**: Spawn topology plus task, handoff, and message relationships with evidence
 - **Workflow Board**: Agent lanes grouped by observed workflow, sortable by Started/Status/Updated
-- **Run History**: Human-readable request, decision, handoff, delivery, and completion story with agent lanes
-- **Trace**: Virtualized low-level timeline with tool, command, file, test, and error filters
-- **Inspector**: Runtime metadata and virtualized recent activity for the selected agent
+- **Run History**: Human-readable request, decision, handoff, delivery, and completion story scoped to the selected agent branch
+- **Trace**: Selected-branch low-level timeline with virtualized tool, command, file, test, and error filters
+- **Inspector**: Runtime metadata, available token usage, and virtualized recent activity for the selected agent
 - **Debug**: Protocol events, normalized events, and connection/version diagnostics
 
 The Workflow Board's `Observed order` is derived from agent start or update
@@ -202,8 +202,8 @@ a bounded debug buffer, and unknown methods do not crash the dashboard.
 - Observed skill/workflow context with Agent filters and per-node markers
 - Evidence-based Workflow Board with observed-order/status/update sorting
 - Human/agent run history with explicit sender, recipients, and completion state; bounded content appears only for fixtures or explicit opt-in capture
-- Story, Messages, and low-level Trace views with Git-style agent lanes
-- Inspector with virtualized recent activity, thread, cwd, and optional token usage
+- Selection-scoped Story, Messages, and low-level Trace views; no global history is shown without an agent selection
+- Inspector with virtualized recent activity, thread, cwd, and provider-reported token usage details
 - Virtualized activity timeline with filters and a 300-event memory bound
 - Explicit approval and user-input waiting reasons
 - Claude Agent Teams beta roles, task coordination, peer messages, and shutdown evidence

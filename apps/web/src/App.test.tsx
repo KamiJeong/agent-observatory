@@ -458,7 +458,7 @@ describe("dashboard interactions", () => {
       title: `Event ${index}`,
       startedAt: 1_000 + index,
     }));
-    render(<ActivityTimeline snapshot={{ ...snapshot, activities }} />);
+    render(<ActivityTimeline snapshot={{ ...snapshot, activities }} selectedId="tester" />);
     const list = screen.getByRole("list", { name: "Recent activity, 300 events" });
 
     expect(list.querySelectorAll(".timeline-item").length).toBeLessThan(20);
@@ -509,19 +509,40 @@ describe("dashboard interactions", () => {
           occurredAt: 100,
           source: "protocol",
         },
+        {
+          id: "work",
+          kind: "work",
+          actor: { type: "agent", id: "tester" },
+          summary: "Running browser command",
+          status: "running",
+          occurredAt: 250,
+          source: "protocol",
+        },
+        {
+          id: "derived-message",
+          kind: "delivery",
+          actor: { type: "agent", id: "tester" },
+          recipients: [{ type: "agent", id: "root" }],
+          summary: "Coordinating browser run",
+          status: "running",
+          occurredAt: 260,
+          source: "derived",
+        },
       ],
-    }} />);
+    }} selectedId="root" />);
 
     const events = screen.getByRole("list", { name: "Run history, 3 events" });
     expect([...events.querySelectorAll(".history-event__summary")].map((node) => node.textContent))
       .toEqual(["Request received", "Plan updated", "Sent message"]);
     expect(screen.getByText("Verify the browser flow")).toBeInTheDocument();
+    expect(screen.queryByText("Running browser command")).not.toBeInTheDocument();
+    expect(screen.queryByText("Coordinating browser run")).not.toBeInTheDocument();
     expect(events.querySelector(".history-event__route")?.textContent).toContain("Human→Main");
     expect(events.querySelectorAll(".history-event__route")[2]?.textContent).toContain("Main→Tester");
   });
 
-  it("switches the right rail between narrative messages and low-level trace", () => {
-    render(<RightRail snapshot={{
+  it("requires an agent selection before showing narrative messages or low-level trace", () => {
+    const historySnapshot: ObservatorySnapshot = {
       ...snapshot,
       history: [{
         id: "message",
@@ -533,12 +554,80 @@ describe("dashboard interactions", () => {
         occurredAt: 100,
         source: "protocol",
       }],
-    }} onClear={() => undefined} now={5_000} />);
+    };
+    const rendered = render(<RightRail snapshot={historySnapshot} onClear={() => undefined} now={5_000} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "Messages" }));
+    expect(screen.getByRole("list", { name: "Messages, 0 events" })).toHaveTextContent("Select an agent");
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+    expect(screen.getByRole("list", { name: "Recent activity, 0 events" })).toHaveTextContent("Select an agent");
+
+    rendered.rerender(<RightRail
+      snapshot={historySnapshot}
+      selectedId="root"
+      onClear={() => undefined}
+      now={5_000}
+    />);
+    fireEvent.click(screen.getByRole("tab", { name: "History" }));
     fireEvent.click(screen.getByRole("button", { name: "Messages" }));
     expect(screen.getByRole("list", { name: "Messages, 1 events" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Trace" }));
     expect(screen.getByRole("list", { name: "Recent activity, 1 events" })).toBeInTheDocument();
+  });
+
+  it("limits history and timeline to the selected agent branch", () => {
+    const scopedSnapshot: ObservatorySnapshot = {
+      ...snapshot,
+      agents: {
+        ...snapshot.agents,
+        sibling: {
+          provider: "codex",
+          id: "sibling",
+          threadId: "sibling",
+          parentId: "root",
+          nickname: "Sibling",
+          role: "reviewer",
+          status: "working",
+          waitingReasons: [],
+          recentActivityIds: [],
+          children: [],
+        },
+        root: { ...snapshot.agents.root!, children: ["tester", "sibling"] },
+      },
+      activities: [
+        ...snapshot.activities,
+        { id: "sibling-work", agentId: "sibling", kind: "command", title: "Sibling command", startedAt: 200 },
+      ],
+      history: [
+        {
+          id: "to-tester",
+          kind: "handoff",
+          actor: { type: "agent", id: "root" },
+          recipients: [{ type: "agent", id: "tester" }],
+          summary: "Assigned testing",
+          occurredAt: 100,
+          source: "protocol",
+        },
+        {
+          id: "to-sibling",
+          kind: "handoff",
+          actor: { type: "agent", id: "root" },
+          recipients: [{ type: "agent", id: "sibling" }],
+          summary: "Assigned review",
+          occurredAt: 200,
+          source: "protocol",
+        },
+      ],
+    };
+
+    render(<RunHistory snapshot={scopedSnapshot} selectedId="tester" />);
+    expect(screen.getByText("Assigned testing")).toBeInTheDocument();
+    expect(screen.queryByText("Assigned review")).not.toBeInTheDocument();
+
+    cleanup();
+    render(<ActivityTimeline snapshot={scopedSnapshot} selectedId="tester" />);
+    expect(screen.getByText("Running vitest")).toBeInTheDocument();
+    expect(screen.queryByText("Sibling command")).not.toBeInTheDocument();
   });
 
   it("returns the right rail to History when the inspector closes", () => {
@@ -548,6 +637,7 @@ describe("dashboard interactions", () => {
     );
 
     expect(screen.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Not reported by this provider.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close inspector" }));
     expect(onClear).toHaveBeenCalledOnce();
     rerender(<RightRail snapshot={snapshot} onClear={onClear} now={5_000} />);
@@ -619,7 +709,23 @@ describe("dashboard interactions", () => {
   });
 
   it("shows waiting reason and recent activity in the inspector", () => {
-    render(<RightRail snapshot={snapshot} selectedId="tester" onClear={() => undefined} now={5_000} />);
+    render(<RightRail snapshot={{
+      ...snapshot,
+      agents: {
+        ...snapshot.agents,
+        tester: {
+          ...snapshot.agents.tester!,
+          tokenUsage: {
+            inputTokens: 20_000,
+            cachedInputTokens: 8_000,
+            outputTokens: 900,
+            reasoningOutputTokens: 300,
+            totalTokens: 20_900,
+            modelContextWindow: 258_400,
+          },
+        },
+      },
+    }} selectedId="tester" onClear={() => undefined} now={5_000} />);
     expect(screen.getAllByText(/Waiting · approval/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Running vitest").length).toBeGreaterThan(0);
     expect(screen.getByText("gpt-5.6-terra")).toBeInTheDocument();
@@ -627,5 +733,9 @@ describe("dashboard interactions", () => {
     expect(screen.getByText("sdd-verify")).toBeInTheDocument();
     expect(screen.getByText("SDD")).toBeInTheDocument();
     expect(screen.getByText("/repo")).toBeInTheDocument();
+    expect(screen.getByText("20,900")).toBeInTheDocument();
+    expect(screen.getByText("20,000")).toBeInTheDocument();
+    expect(screen.getByText("8,000")).toBeInTheDocument();
+    expect(screen.getByText("258,400")).toBeInTheDocument();
   });
 });

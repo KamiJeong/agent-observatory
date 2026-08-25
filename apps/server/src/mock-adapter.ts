@@ -438,6 +438,19 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
       summary: "Review evidence shared", content: "Raw provider content remains outside the public payload.",
       status: "sent", occurredAt: now + 4, source: "mock",
     });
+    this.#emit({
+      type: "token.updated",
+      at: now + 4,
+      threadId: "codex:demo-orchestrator",
+      usage: {
+        inputTokens: 20_000,
+        cachedInputTokens: 8_000,
+        outputTokens: 900,
+        reasoningOutputTokens: 300,
+        totalTokens: 20_900,
+        modelContextWindow: 258_400,
+      },
+    });
     this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout");
     this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts");
     this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence");

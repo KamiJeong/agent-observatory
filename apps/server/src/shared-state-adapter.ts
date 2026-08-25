@@ -24,6 +24,7 @@ import type {
   ReadThreadOptions,
   RuntimeInfo,
   ThreadSnapshot,
+  TokenUsageSnapshot,
 } from "@observatory/core";
 import {
   discoverInteractiveCodexProcesses,
@@ -46,6 +47,7 @@ interface RolloutState {
   observedSkills: string[];
   observedWorkflows: string[];
   collaborationMode?: string;
+  tokenUsage?: TokenUsageSnapshot;
   activities: AgentActivity[];
   history: HistoryEvent[];
 }
@@ -90,6 +92,31 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function rolloutTokenUsage(payload: Record<string, unknown>): TokenUsageSnapshot | undefined {
+  const info = recordValue(payload.info);
+  const total = recordValue(info?.total_token_usage);
+  if (!info || !total) return undefined;
+  const usage: TokenUsageSnapshot = {
+    ...(finiteNumber(total.input_tokens) !== undefined ? { inputTokens: finiteNumber(total.input_tokens) } : {}),
+    ...(finiteNumber(total.cached_input_tokens) !== undefined
+      ? { cachedInputTokens: finiteNumber(total.cached_input_tokens) }
+      : {}),
+    ...(finiteNumber(total.output_tokens) !== undefined ? { outputTokens: finiteNumber(total.output_tokens) } : {}),
+    ...(finiteNumber(total.reasoning_output_tokens) !== undefined
+      ? { reasoningOutputTokens: finiteNumber(total.reasoning_output_tokens) }
+      : {}),
+    ...(finiteNumber(total.total_tokens) !== undefined ? { totalTokens: finiteNumber(total.total_tokens) } : {}),
+    ...(finiteNumber(info.model_context_window) !== undefined
+      ? { modelContextWindow: finiteNumber(info.model_context_window) }
+      : {}),
+  };
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 function timestampValue(value: unknown): number | undefined {
@@ -269,6 +296,7 @@ export function parseRolloutState(
   let model: string | undefined;
   let reasoningEffort: string | undefined;
   let collaborationMode: string | undefined;
+  let tokenUsage: TokenUsageSnapshot | undefined;
   const observedSkills = new Set<string>();
   const observedWorkflows = new Set<string>();
   const openCalls = new Map<string, AgentActivity>();
@@ -295,6 +323,10 @@ export function parseRolloutState(
     }
 
     if (envelope.type === "event_msg") {
+      if (payload.type === "token_count") {
+        tokenUsage = rolloutTokenUsage(payload) ?? tokenUsage;
+        continue;
+      }
       if (payload.type === "task_started" && at !== undefined) {
         taskStartedAt = at;
         openHistory.set(`compat-turn:${threadId}`, {
@@ -445,6 +477,7 @@ export function parseRolloutState(
     observedSkills: [...observedSkills].sort(),
     observedWorkflows: [...observedWorkflows].sort(),
     ...(collaborationMode ? { collaborationMode } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
     history,
     activities,
   };
@@ -522,6 +555,7 @@ export class SharedStateCodexAdapter implements AgentRuntimeAdapter {
   #seenHistoryOrder: string[] = [];
   #lastLifecycle = new Map<string, string>();
   #lastThreadFingerprint = new Map<string, string>();
+  #lastTokenFingerprint = new Map<string, string>();
   #rolloutCache = new Map<string, {
     size: number;
     mtimeMs: number;
@@ -792,6 +826,13 @@ export class SharedStateCodexAdapter implements AgentRuntimeAdapter {
     if (this.#lastThreadFingerprint.get(thread.snapshot.id) !== fingerprint) {
       this.#lastThreadFingerprint.set(thread.snapshot.id, fingerprint);
       this.#emit({ type: "thread.discovered", at, thread: thread.snapshot });
+    }
+    if (thread.rollout.tokenUsage) {
+      const usageFingerprint = JSON.stringify(thread.rollout.tokenUsage);
+      if (this.#lastTokenFingerprint.get(thread.snapshot.id) !== usageFingerprint) {
+        this.#lastTokenFingerprint.set(thread.snapshot.id, usageFingerprint);
+        this.#emit({ type: "token.updated", at, threadId: thread.snapshot.id, usage: thread.rollout.tokenUsage });
+      }
     }
     const lifecycle = thread.rollout.lifecycle;
     if (lifecycle && this.#lastLifecycle.get(thread.snapshot.id) !== lifecycle) {

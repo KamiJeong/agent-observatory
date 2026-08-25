@@ -7,6 +7,10 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/$/);
   await expect(page.getByRole("heading", { name: "Agent Observatory" })).toBeVisible();
   await expect(page.getByRole("status", { name: "Dashboard transport: Connected" })).toContainText("Connected");
+  await expect(page.getByText("Select an agent to view its run history.")).toBeVisible();
+  await page.locator(".agent-row", { hasText: "Main" }).click();
+  await expect(page.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("tab", { name: "History" }).click();
   await expect.poll(() => page.evaluate(() => {
     const size = (selector: string) => getComputedStyle(document.querySelector(selector)!).fontSize;
     return {
@@ -20,8 +24,8 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
     body: "14px",
     historyTime: "12px",
     historyRoute: "13px",
-    historySummary: "16px",
-    historyContent: "14px",
+    historySummary: "14px",
+    historyContent: "12px",
   });
 
   await expect(page.getByRole("button", { name: /Researcher, (Working|Completed)/i })).toBeVisible({ timeout: 5_000 });

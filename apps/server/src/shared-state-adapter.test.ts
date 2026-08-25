@@ -34,6 +34,46 @@ describe("shared Codex state compatibility", () => {
     });
   });
 
+  it("keeps the latest cumulative token usage from rollout events", () => {
+    const state = parseRolloutState([
+      line("2026-08-24T01:00:00.000Z", "event_msg", {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: 11_610,
+            cached_input_tokens: 3_456,
+            output_tokens: 472,
+            reasoning_output_tokens: 157,
+            total_tokens: 12_082,
+          },
+          model_context_window: 258_400,
+        },
+      }),
+      line("2026-08-24T01:00:01.000Z", "event_msg", {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: 20_000,
+            cached_input_tokens: 8_000,
+            output_tokens: 900,
+            reasoning_output_tokens: 300,
+            total_tokens: 20_900,
+          },
+          model_context_window: 258_400,
+        },
+      }),
+    ].join("\n"), "root-1", true, true);
+
+    expect(state.tokenUsage).toEqual({
+      inputTokens: 20_000,
+      cachedInputTokens: 8_000,
+      outputTokens: 900,
+      reasoningOutputTokens: 300,
+      totalTokens: 20_900,
+      modelContextWindow: 258_400,
+    });
+  });
+
   it("extracts only observed skill and workflow evidence from tool input", () => {
     expect(executionContextFromToolInput(JSON.stringify({
       cmd: "rtk cat .agents/skills/sdd-plan/SKILL.md && rtk sed -n '1,80p' .sdd/workflow.yaml",

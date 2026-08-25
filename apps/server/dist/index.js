@@ -3427,6 +3427,19 @@ var MockCodexAdapter = class {
       occurredAt: now + 4,
       source: "mock"
     });
+    this.#emit({
+      type: "token.updated",
+      at: now + 4,
+      threadId: "codex:demo-orchestrator",
+      usage: {
+        inputTokens: 2e4,
+        cachedInputTokens: 8e3,
+        outputTokens: 900,
+        reasoningOutputTokens: 300,
+        totalTokens: 20900,
+        modelContextWindow: 258400
+      }
+    });
     this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout");
     this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts");
     this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence");
@@ -3796,6 +3809,23 @@ function jsonRecord(line) {
 function recordValue3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function rolloutTokenUsage(payload) {
+  const info = recordValue3(payload.info);
+  const total = recordValue3(info?.total_token_usage);
+  if (!info || !total) return void 0;
+  const usage = {
+    ...finiteNumber(total.input_tokens) !== void 0 ? { inputTokens: finiteNumber(total.input_tokens) } : {},
+    ...finiteNumber(total.cached_input_tokens) !== void 0 ? { cachedInputTokens: finiteNumber(total.cached_input_tokens) } : {},
+    ...finiteNumber(total.output_tokens) !== void 0 ? { outputTokens: finiteNumber(total.output_tokens) } : {},
+    ...finiteNumber(total.reasoning_output_tokens) !== void 0 ? { reasoningOutputTokens: finiteNumber(total.reasoning_output_tokens) } : {},
+    ...finiteNumber(total.total_tokens) !== void 0 ? { totalTokens: finiteNumber(total.total_tokens) } : {},
+    ...finiteNumber(info.model_context_window) !== void 0 ? { modelContextWindow: finiteNumber(info.model_context_window) } : {}
+  };
+  return Object.keys(usage).length > 0 ? usage : void 0;
+}
 function timestampValue3(value) {
   if (typeof value !== "string") return void 0;
   const parsed = Date.parse(value);
@@ -3925,6 +3955,7 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
   let model;
   let reasoningEffort;
   let collaborationMode;
+  let tokenUsage2;
   const observedSkills = /* @__PURE__ */ new Set();
   const observedWorkflows = /* @__PURE__ */ new Set();
   const openCalls = /* @__PURE__ */ new Map();
@@ -3948,6 +3979,10 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
       continue;
     }
     if (envelope.type === "event_msg") {
+      if (payload.type === "token_count") {
+        tokenUsage2 = rolloutTokenUsage(payload) ?? tokenUsage2;
+        continue;
+      }
       if (payload.type === "task_started" && at !== void 0) {
         taskStartedAt = at;
         openHistory.set(`compat-turn:${threadId}`, {
@@ -4082,6 +4117,7 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
     observedSkills: [...observedSkills].sort(),
     observedWorkflows: [...observedWorkflows].sort(),
     ...collaborationMode ? { collaborationMode } : {},
+    ...tokenUsage2 ? { tokenUsage: tokenUsage2 } : {},
     history,
     activities
   };
@@ -4153,6 +4189,7 @@ var SharedStateCodexAdapter = class {
   #seenHistoryOrder = [];
   #lastLifecycle = /* @__PURE__ */ new Map();
   #lastThreadFingerprint = /* @__PURE__ */ new Map();
+  #lastTokenFingerprint = /* @__PURE__ */ new Map();
   #rolloutCache = /* @__PURE__ */ new Map();
   #processDiscoveryCache;
   #lastDiscoveryWarning;
@@ -4391,6 +4428,13 @@ var SharedStateCodexAdapter = class {
     if (this.#lastThreadFingerprint.get(thread.snapshot.id) !== fingerprint) {
       this.#lastThreadFingerprint.set(thread.snapshot.id, fingerprint);
       this.#emit({ type: "thread.discovered", at, thread: thread.snapshot });
+    }
+    if (thread.rollout.tokenUsage) {
+      const usageFingerprint = JSON.stringify(thread.rollout.tokenUsage);
+      if (this.#lastTokenFingerprint.get(thread.snapshot.id) !== usageFingerprint) {
+        this.#lastTokenFingerprint.set(thread.snapshot.id, usageFingerprint);
+        this.#emit({ type: "token.updated", at, threadId: thread.snapshot.id, usage: thread.rollout.tokenUsage });
+      }
     }
     const lifecycle = thread.rollout.lifecycle;
     if (lifecycle && this.#lastLifecycle.get(thread.snapshot.id) !== lifecycle) {

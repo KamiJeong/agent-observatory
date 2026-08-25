@@ -43,6 +43,10 @@ describe("mock adapter integration", () => {
       claude: { phase: "connected" },
     });
     expect(snapshot.agents["codex:demo-tester"]).toMatchObject({ status: "waiting", waitingReasons: ["approval"] });
+    expect(snapshot.agents["codex:demo-orchestrator"]?.tokenUsage).toMatchObject({
+      totalTokens: 20_900,
+      modelContextWindow: 258_400,
+    });
     expect(snapshot.agents["claude:demo-researcher"]?.status).toBe("completed");
     expect(snapshot.edges).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: "codex:demo-orchestrator", target: "claude:demo-lead", kind: "handoff" }),
