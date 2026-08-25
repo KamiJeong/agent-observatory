@@ -23,6 +23,8 @@ describe("mock adapter integration", () => {
       id: "mock-main->mock-tester",
       source: "mock-main",
       target: "mock-tester",
+      kind: "spawn",
+      evidenceSource: "derived",
     });
     await adapter.disconnect();
   });

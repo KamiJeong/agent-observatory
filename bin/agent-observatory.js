@@ -8,13 +8,14 @@ import { parseArgs } from "node:util";
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `agent-observatory ${packageJson.version}
 
-Run a local dashboard for Codex multi-agent workflows.
+Run a local dashboard for Codex and Claude multi-agent workflows.
 
 Usage:
   agent-observatory [options]
 
 Options:
-  --real                 Observe active local Codex sessions
+  --real                 Observe active local agent sessions
+  --provider <name>      codex, claude, or all (default: codex)
   --port <number>        HTTP/WebSocket port (default: 4317)
   --cwd <path|all>       Restrict Real Mode to one working directory
   --root-thread <id>     Restrict Real Mode to one root thread tree
@@ -28,6 +29,8 @@ Options:
 Examples:
   bunx agent-observatory
   bunx agent-observatory --real
+  bunx agent-observatory --real --provider all
+  bunx agent-observatory --real --provider claude
   bunx agent-observatory --real --cwd /projects/design-system
   bunx agent-observatory --scenario stress --no-open
 `;
@@ -37,6 +40,7 @@ try {
   ({ values } = parseArgs({
     options: {
       real: { type: "boolean" },
+      provider: { type: "string" },
       port: { type: "string" },
       cwd: { type: "string" },
       "root-thread": { type: "string" },
@@ -86,8 +90,19 @@ if (values.scenario && !scenarios.has(values.scenario)) {
   process.exit(1);
 }
 
+const providers = new Set(["codex", "claude", "all"]);
+if (values.provider && !providers.has(values.provider)) {
+  console.error(`Invalid provider: ${values.provider}. Use codex, claude, or all.`);
+  process.exit(1);
+}
+
 process.env.OBSERVATORY_PORT = String(port);
-process.env.OBSERVATORY_ADAPTER = values.real ? "codex" : "mock";
+process.env.OBSERVATORY_ADAPTER = values.real ? "real" : "mock";
+if (values.real) {
+  process.env.OBSERVATORY_PROVIDERS = values.provider === "all"
+    ? "codex,claude"
+    : values.provider ?? "codex";
+}
 if (values.cwd) process.env.OBSERVATORY_CWD = values.cwd;
 if (values["root-thread"]) process.env.OBSERVATORY_ROOT_THREAD_ID = values["root-thread"];
 if (values.transport) process.env.OBSERVATORY_CODEX_TRANSPORT = values.transport;

@@ -24,12 +24,19 @@ export function layoutGraph(snapshot: ObservatorySnapshot): {
   const positions: Record<string, Point> = {};
   const memo = new Map<string, LayoutBox>();
   const building = new Set<string>();
+  const spawnChildren = new Map<string, string[]>();
+  for (const edge of snapshot.edges) {
+    if (edge.kind !== "spawn" || !snapshot.agents[edge.source] || !snapshot.agents[edge.target]) continue;
+    const children = spawnChildren.get(edge.source) ?? [];
+    if (!children.includes(edge.target)) children.push(edge.target);
+    spawnChildren.set(edge.source, children);
+  }
   const buildBox = (id: string): LayoutBox => {
     const cached = memo.get(id);
     if (cached) return cached;
     if (building.has(id)) return { width: nodeWidth, height: nodeHeight, rootX: 0, children: [] };
     building.add(id);
-    const childIds = snapshot.agents[id]?.children.filter((child) => snapshot.agents[child] && !building.has(child)) ?? [];
+    const childIds = (spawnChildren.get(id) ?? []).filter((child) => !building.has(child));
     if (childIds.length === 0) {
       const leaf = { width: nodeWidth, height: nodeHeight, rootX: 0, children: [] };
       memo.set(id, leaf);

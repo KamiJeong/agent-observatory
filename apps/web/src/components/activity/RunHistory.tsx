@@ -1,6 +1,6 @@
 import { useMemo, type CSSProperties } from "react";
 import type { HistoryActor, HistoryEvent, ObservatorySnapshot } from "@observatory/core";
-import { formatTime, roleColor, shortId } from "../shared/presentation.tsx";
+import { agentProvider, formatTime, ProviderBadge, roleColor, shortId } from "../shared/presentation.tsx";
 
 export type RunHistoryMode = "story" | "messages";
 
@@ -24,11 +24,25 @@ function actorColor(actor: HistoryActor, snapshot: ObservatorySnapshot): string 
 }
 
 function HistoryRoute({ event, snapshot }: { event: HistoryEvent; snapshot: ObservatorySnapshot }) {
-  const recipients = event.recipients?.map((recipient) => actorLabel(recipient, snapshot)) ?? [];
+  const actor = event.actor.type === "agent" && event.actor.id ? snapshot.agents[event.actor.id] : undefined;
+  const recipients = event.recipients ?? [];
   return (
     <span className="history-event__route">
+      {actor && <ProviderBadge provider={agentProvider(actor, snapshot.runtime.adapter)} compact />}
       <strong>{actorLabel(event.actor, snapshot)}</strong>
-      {recipients.length > 0 && <><span aria-hidden="true">→</span><span>{recipients.join(", ")}</span></>}
+      {recipients.length > 0 && <>
+        <span aria-hidden="true">→</span>
+        <span className="history-event__recipients">
+          {recipients.map((recipient, index) => {
+            const recipientId = recipient.type === "agent" ? recipient.id : undefined;
+            const recipientAgent = recipientId ? snapshot.agents[recipientId] : undefined;
+            return <span key={`${recipient.type}:${recipientId ?? recipient.label ?? index}`}>
+              {recipientAgent && <ProviderBadge provider={agentProvider(recipientAgent, snapshot.runtime.adapter)} compact />}
+              {actorLabel(recipient, snapshot)}{index < recipients.length - 1 ? "," : ""}
+            </span>;
+          })}
+        </span>
+      </>}
     </span>
   );
 }

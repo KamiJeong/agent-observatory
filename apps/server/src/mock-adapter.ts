@@ -1,7 +1,7 @@
 import type {
   AgentActivity,
-  CodexAdapter,
-  CodexRuntimeEvent,
+  AgentRuntimeAdapter,
+  AgentRuntimeEvent,
   DiscoveryOptions,
   HistoryEvent,
   NativeThreadStatus,
@@ -47,11 +47,12 @@ function baseThread(
   };
 }
 
-export class MockCodexAdapter implements CodexAdapter {
+export class MockCodexAdapter implements AgentRuntimeAdapter {
+  readonly provider = "mock" as const;
   readonly mode = "mock" as const;
   #scenario: Scenario;
   #threads = new Map<string, ThreadSnapshot>();
-  #listeners = new Set<(event: CodexRuntimeEvent) => void>();
+  #listeners = new Set<(event: AgentRuntimeEvent) => void>();
   #timers: Array<ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>> = [];
   #connected = false;
 
@@ -66,6 +67,7 @@ export class MockCodexAdapter implements CodexAdapter {
   runtimeInfo(): RuntimeInfo {
     return {
       adapter: "mock",
+      provider: this.provider,
       observatoryVersion: "0.1.0",
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
@@ -159,13 +161,14 @@ export class MockCodexAdapter implements CodexAdapter {
     return thread;
   }
 
-  subscribe(listener: (event: CodexRuntimeEvent) => void): () => void {
+  subscribe(listener: (event: AgentRuntimeEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
 
-  #emit(event: CodexRuntimeEvent): void {
-    for (const listener of this.#listeners) listener(event);
+  #emit(event: AgentRuntimeEvent): void {
+    const tagged = { ...event, provider: event.provider ?? this.provider } as AgentRuntimeEvent;
+    for (const listener of this.#listeners) listener(tagged);
   }
 
   #schedule(delay: number, action: () => void): void {

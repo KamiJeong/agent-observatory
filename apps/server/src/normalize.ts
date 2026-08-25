@@ -198,10 +198,14 @@ function historyFromItem(
   const receivers = stringArray(item.receiverThreadIds) ?? [];
   const recipients = receivers.map((id) => agentRef(id));
   const tool = stringValue(item.tool) ?? "collaboration";
-  const details: Record<string, { kind: HistoryEvent["kind"]; summary: string }> = {
-    spawnAgent: { kind: "handoff", summary: "Delegated work" },
-    sendInput: { kind: "handoff", summary: "Sent message" },
-    resumeAgent: { kind: "handoff", summary: "Resumed agent" },
+  const details: Record<string, {
+    kind: HistoryEvent["kind"];
+    summary: string;
+    relationKind?: HistoryEvent["relationKind"];
+  }> = {
+    spawnAgent: { kind: "handoff", summary: "Delegated work", relationKind: "spawn" },
+    sendInput: { kind: "handoff", summary: "Sent message", relationKind: "message" },
+    resumeAgent: { kind: "handoff", summary: "Resumed agent", relationKind: "handoff" },
     wait: { kind: "work", summary: "Waited for agents" },
     closeAgent: { kind: "completion", summary: "Closed agent" },
   };
@@ -209,6 +213,7 @@ function historyFromItem(
   const events: HistoryEvent[] = [{
     ...base,
     kind: detail.kind,
+    ...(detail.relationKind ? { relationKind: detail.relationKind } : {}),
     actor: agentRef(senderId),
     ...(recipients.length > 0 ? { recipients } : {}),
     summary: detail.summary,

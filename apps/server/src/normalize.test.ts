@@ -156,6 +156,7 @@ describe("protocol normalization", () => {
       type: "history.recorded",
       history: expect.objectContaining({
         kind: "handoff",
+        relationKind: "message",
         actor: { type: "agent", id: "root" },
         recipients: [{ type: "agent", id: "reviewer" }],
         content: "Check the cookie boundary",

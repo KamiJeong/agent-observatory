@@ -5,8 +5,8 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   expect(bootstrapUrl).toBeTruthy();
   await page.goto(bootstrapUrl ?? "/");
   await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/$/);
-  await expect(page.getByRole("heading", { name: "Codex Observatory" })).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Connected");
+  await expect(page.getByRole("heading", { name: "Agent Observatory" })).toBeVisible();
+  await expect(page.getByRole("status", { name: "Dashboard transport: Connected" })).toContainText("Connected");
   await expect.poll(() => page.evaluate(() => {
     const size = (selector: string) => getComputedStyle(document.querySelector(selector)!).fontSize;
     return {
@@ -71,9 +71,17 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   // 1440px desktop viewport. The responsive layout must not lose content or
   // introduce horizontal page scrolling at that size.
   await page.setViewportSize({ width: 720, height: 450 });
-  await expect(page.getByRole("heading", { name: "Codex Observatory" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent Observatory" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => ({
     clientWidth: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth,
   }))).toEqual({ clientWidth: 720, scrollWidth: 720 });
+
+  await page.setViewportSize({ width: 320, height: 700 });
+  await expect(page.getByRole("heading", { name: "Agent Observatory" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Provider" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }))).toEqual({ clientWidth: 320, scrollWidth: 320 });
 });

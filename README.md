@@ -1,17 +1,17 @@
-# Codex Agent Observatory
+# Agent Observatory
 
 [English](README.md) | [한국어](README.ko.md)
 
-Codex Agent Observatory is a local agent observability dashboard for viewing
-Codex root-agent and subagent relationships, execution status, current activity,
+Agent Observatory is a local agent observability dashboard for viewing Codex and
+Claude Code root-agent and subagent relationships, execution status, current activity,
 approval or user-input waits, and recent tool, file, and command activity in one
 place.
 
-Rather than displaying raw logs, it normalizes the Codex App Server protocol
-into Observatory domain events and projects them onto an agent graph and a
-bounded activity timeline.
+Rather than displaying raw logs, it normalizes provider protocol and local
+compatibility evidence into Observatory domain events and projects them onto an
+agent graph and a bounded activity timeline.
 
-Its goal is to quickly answer the following questions when multiple Codex agents
+Its goal is to quickly answer the following questions when multiple agents
 are working in parallel:
 
 - Who is working right now?
@@ -23,6 +23,9 @@ are working in parallel:
 
 ![Status](https://img.shields.io/badge/status-MVP-3b82f6)
 ![Codex](https://img.shields.io/badge/Codex-0.149.0-64748b)
+![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.241-d97757)
+[![npm version](https://img.shields.io/npm/v/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
+[![npm downloads](https://img.shields.io/npm/dm/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
 
 ## Demo
 
@@ -39,11 +42,16 @@ which works without Codex and opens a browser automatically.
 bunx agent-observatory
 ```
 
-Use Real Mode to observe Codex agents running on the current machine.
+Use Real Mode to observe Codex, Claude Code, or both on the current machine.
 
 ```bash
 bunx agent-observatory --real
+bunx agent-observatory --real --provider claude
+bunx agent-observatory --real --provider all
 ```
+
+For backward compatibility, `--real` defaults to Codex. Use `--provider all`
+for the combined dashboard.
 
 You can also limit observation to a specific working directory or disable
 automatic browser launch.
@@ -55,6 +63,15 @@ bunx agent-observatory --scenario stress --no-open
 
 The default address is <http://127.0.0.1:4317>. Run
 `bunx agent-observatory --help` to see all options.
+
+### Package registry
+
+The canonical public package is
+[`agent-observatory` on npmjs.org](https://www.npmjs.com/package/agent-observatory).
+The repository intentionally does not publish a duplicate scoped package to
+GitHub Packages, so an empty **Packages** section in the GitHub repository
+sidebar is expected. GitHub Releases and npm versions are kept aligned by the
+release workflow.
 
 ### Clone the repository for development
 
@@ -70,18 +87,20 @@ bun install
 bun run dev
 ```
 
-Open the `Codex Agent Observatory server` bootstrap URL printed by the backend.
+Open the `Agent Observatory server` bootstrap URL printed by the backend.
 It sets an HttpOnly local session cookie and redirects to
 <http://127.0.0.1:4318> without leaving credentials in the dashboard URL.
 
-#### 2. Observe currently running Codex agents
+#### 2. Observe currently running agents
 
-Use Real Mode when Codex CLI is installed and an agent workflow is running
-locally.
+Use Real Mode when at least one selected provider CLI is installed and an agent
+workflow is running locally.
 
 ```bash
 codex --version
+claude --version
 bun run dev:real
+bun run dev:real -- --provider codex,claude
 ```
 
 The development launcher opens the authenticated dashboard automatically when
@@ -109,27 +128,27 @@ bun run dev:real -- --cwd /absolute/path/to/project
 
 The Workflow Board's `Observed order` is derived from agent start or update
 times. It does not represent a workflow stage or orchestration ownership
-declared by Codex. When no supporting evidence exists, the UI displays
+declared by a provider. When no supporting evidence exists, the UI displays
 `No workflow evidence` instead of guessing.
 
 ## Architecture
 
 ```text
-Codex App Server (JSONL over stdio)
-             │
-             ▼
-      RealCodexAdapter ───── MockCodexAdapter
-             │                       │
-             └──── normalized events ┘
-                         │
-                         ▼
-                Agent state projector
-                         │
-                         ▼
-              Local HTTP/WebSocket server
-                         │
-                         ▼
-                  React dashboard
+Codex protocol/state ── RealCodexAdapter ─┐
+                                         │
+Claude transcripts ── ClaudeCodeAdapter ─┼─ CompositeRuntimeAdapter
+                                         │             │
+Mock scenario ──────── MockCodexAdapter ─┘             ▼
+                                              normalized events
+                                                      │
+                                                      ▼
+                                             Agent state projector
+                                                      │
+                                                      ▼
+                                           Local HTTP/WebSocket server
+                                                      │
+                                                      ▼
+                                                React dashboard
 ```
 
 ```text
@@ -144,11 +163,14 @@ generated/
   codex*/                 Codex 0.149.0 generated TS and JSON Schema
 docs/
   architecture.md         Module boundaries and dependency rules
+  accessibility.md        WCAG measurements and release verification checklist
   codex-protocol.md       Phase 1 protocol findings and mapping decisions
 ```
 
 See [Architecture boundaries](docs/architecture.md) for the module ownership,
 dependency direction, and extension points used by the server and dashboard.
+The [accessibility verification guide](docs/accessibility.md) records measured
+contrast, automated coverage, and the manual release checklist.
 
 Raw Codex JSON is never consumed by React components. Known envelopes are
 tolerantly normalized; additive fields are allowed, malformed events go to a
@@ -214,10 +236,12 @@ detected interactive Codex process, and records that approximation in Debug.
 - Node.js 22.13 or later (`node:sqlite` is required)
 - Bun 1.3.14
 - Codex CLI 0.149.x for Real Mode
+- Claude Code 2.1.241 for the currently verified Claude compatibility adapter
 - macOS: the system `ps` and `lsof` commands
 - Windows: Windows PowerShell with CIM available
 
-Mock Mode does not require Codex CLI.
+Mock Mode does not require either agent CLI. Real Mode requires only the
+provider selected with `--provider`.
 
 ## Development
 
@@ -286,18 +310,30 @@ Environment options:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OBSERVATORY_ADAPTER` | `mock` | Set to `codex` for Real Mode |
+| `OBSERVATORY_ADAPTER` | `mock` | Set to `real` for provider-backed Real Mode |
+| `OBSERVATORY_PROVIDERS` | `codex` | `codex`, `claude`, or comma-separated providers |
 | `OBSERVATORY_PORT` | `4317` | Backend HTTP/WebSocket port |
 | `OBSERVATORY_CWD` | `all` in shared mode | Exact cwd filter; use `all` to disable |
 | `OBSERVATORY_ROOT_THREAD_ID` | unset | Include one root plus its descendants |
 | `OBSERVATORY_CODEX_TRANSPORT` | `shared` | `shared`, `standalone`, or experimental `proxy` |
 | `OBSERVATORY_SCENARIO` | `a` | Mock fixture: `a`, `b`, or `stress` |
+| `OBSERVATORY_CAPTURE_CONTENT` | unset | Set to `1` to expose bounded provider content in the local browser; metadata-only by default |
 
 Example:
 
 ```bash
 bun run dev:real -- --root-thread 019f...
+bun run dev:real -- --provider codex,claude
 ```
+
+## Real Claude Code Mode
+
+Claude observation is a version-aware compatibility adapter. It discovers
+active Claude Code working directories and tails bounded root/subagent
+transcripts without retaining prompt, response, thinking, command, path, or
+tool-input contents. Official hooks and OpenTelemetry remain planned accuracy
+enhancements. See [Claude compatibility](docs/claude-compatibility.md) for the
+evidence and version boundary.
 
 ### Real-time observation boundary
 

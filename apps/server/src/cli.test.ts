@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,23 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<v
 }
 
 describe("agent-observatory CLI", () => {
+  it("documents provider selection and rejects unsupported providers", () => {
+    const help = spawnSync(process.execPath, [cliPath, "--help"], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+    });
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain("--provider <name>");
+    expect(help.stdout).toContain("--real --provider all");
+
+    const invalid = spawnSync(process.execPath, [cliPath, "--real", "--provider", "unknown"], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+    });
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toContain("Invalid provider: unknown. Use codex, claude, or all.");
+  });
+
   it("keeps the server running when the platform browser command is missing", async () => {
     const port = await findFreePort();
     const child = spawn(process.execPath, [

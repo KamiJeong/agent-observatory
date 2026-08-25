@@ -1,7 +1,7 @@
 {
   "name": "agent-observatory",
   "version": "0.1.4",
-  "description": "Local observability dashboard for Codex CLI multi-agent workflows",
+  "description": "Local observability dashboard for Codex and Claude Code multi-agent workflows",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -23,6 +23,8 @@
   },
   "keywords": [
     "codex",
+    "claude",
+    "claude-code",
     "agents",
     "observability",
     "dashboard",

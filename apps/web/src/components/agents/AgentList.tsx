@@ -3,7 +3,9 @@ import type { AgentNode, ObservatorySnapshot } from "@observatory/core";
 import {
   agentContextLabel,
   agentContextSummary,
+  agentProvider,
   agentRuntimeLabel,
+  ProviderBadge,
   roleColor,
   shortId,
   StatusBadge,
@@ -148,6 +150,7 @@ export function AgentList({
                 <span className="agent-row__copy">
                   <strong>{name}</strong>
                   <span className="agent-row__role-line">
+                    <ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} />
                     <span className="agent-row__role">{agent.role ?? "agent"}</span>
                     {childCount > 0 && <span className="agent-row__parent-label">Parent</span>}
                   </span>

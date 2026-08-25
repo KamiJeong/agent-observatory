@@ -16,8 +16,8 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import type {
   AgentActivity,
-  CodexAdapter,
-  CodexRuntimeEvent,
+  AgentRuntimeAdapter,
+  AgentRuntimeEvent,
   DiscoveryOptions,
   HistoryEvent,
   NativeThreadStatus,
@@ -156,6 +156,7 @@ function collaborationHistory(
   return {
     id: `activity:${callId}`,
     kind: "handoff",
+    relationKind: name === "spawn_agent" ? "spawn" : name === "followup_task" ? "task" : "message",
     actor: { type: "agent", id: threadId },
     ...(recipient ? { recipients: [recipient] } : {}),
     summary: name === "spawn_agent" ? "Delegated work" : name === "followup_task" ? "Assigned follow-up" : "Sent message",
@@ -501,9 +502,10 @@ function rowSnapshot(row: SqlRow, rollout: RolloutState): ThreadSnapshot | undef
   };
 }
 
-export class SharedStateCodexAdapter implements CodexAdapter {
+export class SharedStateCodexAdapter implements AgentRuntimeAdapter {
+  readonly provider = "codex" as const;
   readonly mode = "codex" as const;
-  #listeners = new Set<(event: CodexRuntimeEvent) => void>();
+  #listeners = new Set<(event: AgentRuntimeEvent) => void>();
   #db?: DatabaseSync;
   #threads = new Map<string, SharedThread>();
   #watchers: FSWatcher[] = [];
@@ -532,6 +534,7 @@ export class SharedStateCodexAdapter implements CodexAdapter {
   runtimeInfo(): RuntimeInfo {
     return {
       adapter: "codex",
+      provider: this.provider,
       observatoryVersion: "0.1.0",
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
@@ -540,7 +543,7 @@ export class SharedStateCodexAdapter implements CodexAdapter {
     };
   }
 
-  subscribe(listener: (event: CodexRuntimeEvent) => void): () => void {
+  subscribe(listener: (event: AgentRuntimeEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
@@ -839,8 +842,9 @@ export class SharedStateCodexAdapter implements CodexAdapter {
     }
   }
 
-  #emit(event: CodexRuntimeEvent): void {
-    for (const listener of this.#listeners) listener(event);
+  #emit(event: AgentRuntimeEvent): void {
+    const tagged = { ...event, provider: event.provider ?? this.provider } as AgentRuntimeEvent;
+    for (const listener of this.#listeners) listener(tagged);
   }
 
   #debug(summary: string, payload?: unknown): void {
