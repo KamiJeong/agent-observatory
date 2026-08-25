@@ -29,6 +29,24 @@ for (let index = 2; index < process.argv.length; index += 1) {
   env[environmentName] = value;
   index += 1;
 }
+const configuredProviders = (env.OBSERVATORY_PROVIDERS ?? "codex,claude")
+  .split(",")
+  .map((provider) => provider.trim())
+  .filter(Boolean);
+const unknownProviders = configuredProviders.filter((provider) => provider !== "codex" && provider !== "claude");
+if (configuredProviders.length === 0 || unknownProviders.length > 0) {
+  console.error("Invalid Real Mode provider selection. Use codex, claude, or codex,claude.");
+  process.exit(1);
+}
+const includesCodex = configuredProviders.includes("codex");
+const includesClaude = configuredProviders.includes("claude");
+const selectedProviders = includesCodex && includesClaude
+  ? "codex,claude"
+  : includesCodex
+    ? "codex"
+    : "claude";
+env.OBSERVATORY_PROVIDERS = selectedProviders;
+console.log(`Real Mode providers: ${selectedProviders}`);
 const command = { file: "bun", args: ["run", "dev"] };
 const child = spawn(command.file, command.args, { env, stdio: ["inherit", "pipe", "pipe"] });
 const shouldOpen = openPreference ?? (Boolean(process.stdout.isTTY) && !process.env.CI);

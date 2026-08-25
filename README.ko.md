@@ -106,13 +106,15 @@ bun run dev
 codex --version
 claude --version
 bun run dev:real
-bun run dev:real -- --provider codex,claude
+bun run dev:real -- --provider codex
+bun run dev:real -- --provider claude
 ```
 
 개발 실행기는 가능한 경우 인증된 대시보드를 자동으로 엽니다. 자동 실행되지 않으면
-출력된 `Dashboard bootstrap` URL을 여세요. 기본 공유 호환 전송 방식은 현재 머신에서
-관측 가능한 활성 Codex 작업 디렉터리를 함께 탐색합니다. 브라우저 자동 실행을
-끄려면 `--no-open`을 사용하세요.
+출력된 `Dashboard bootstrap` URL을 여세요. 기본적으로 Codex와 Claude를 함께 관측하며,
+`--provider codex` 또는 `--provider claude`로 하나만 선택할 수 있습니다. 공유 호환
+전송 방식은 현재 머신에서 관측 가능한 활성 Codex 작업 디렉터리를 함께 탐색합니다.
+브라우저 자동 실행을 끄려면 `--no-open`을 사용하세요.
 
 특정 프로젝트만 보고 싶다면 정확한 작업 디렉터리를 지정합니다. 개발용 실행기는
 Linux, macOS, PowerShell, 명령 프롬프트에서 같은 옵션을 사용할 수 있습니다.
@@ -259,7 +261,7 @@ Mock Mode에는 두 CLI 모두 필요하지 않습니다. Real Mode에는 `--pro
 
 ```bash
 bun run dev          # 서버 :4317 + Vite :4318, Mock 시나리오 A
-bun run dev:real     # 인증된 로컬 세션을 여는 Real Mode 실행기
+bun run dev:real     # 기본적으로 Codex + Claude를 관측하는 Real Mode 실행기
 bun run typecheck
 bun run test
 bun run test:e2e
@@ -324,7 +326,7 @@ bun run dev:real
 | 변수 | 기본값 | 용도 |
 | --- | --- | --- |
 | `OBSERVATORY_ADAPTER` | `mock` | Provider 기반 Real Mode에서는 `real`로 설정 |
-| `OBSERVATORY_PROVIDERS` | `codex` | 관측할 provider 목록: `codex`, `claude` 또는 `codex,claude` |
+| `OBSERVATORY_PROVIDERS` | 서버는 `codex`, `dev:real`은 `codex,claude` | 관측할 provider 목록: `codex`, `claude` 또는 `codex,claude` |
 | `OBSERVATORY_PORT` | `4317` | 백엔드 HTTP/WebSocket 포트 |
 | `OBSERVATORY_CWD` | 공유 모드에서 `all` | 정확한 작업 디렉터리 필터. 비활성화하려면 `all` 사용 |
 | `OBSERVATORY_ROOT_THREAD_ID` | 미설정 | 루트 하나와 그 자손만 포함 |
