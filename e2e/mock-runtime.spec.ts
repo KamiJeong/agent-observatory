@@ -7,6 +7,22 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/$/);
   await expect(page.getByRole("heading", { name: "Codex Observatory" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Connected");
+  await expect.poll(() => page.evaluate(() => {
+    const size = (selector: string) => getComputedStyle(document.querySelector(selector)!).fontSize;
+    return {
+      body: getComputedStyle(document.body).fontSize,
+      historyTime: size(".history-event > time"),
+      historyRoute: size(".history-event__route"),
+      historySummary: size(".history-event__summary"),
+      historyContent: size(".history-event p"),
+    };
+  })).toEqual({
+    body: "14px",
+    historyTime: "12px",
+    historyRoute: "13px",
+    historySummary: "16px",
+    historyContent: "14px",
+  });
 
   await expect(page.getByRole("button", { name: /Researcher, (Working|Completed)/i })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole("button", { name: /Implementer, Working/i })).toBeVisible();
@@ -24,4 +40,14 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   await page.getByRole("button", { name: /Implementer, Working/i }).click();
   await expect(page.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".details").getByText("Editing AgentStore.ts")).toBeVisible();
+
+  // A 720px CSS viewport is the layout equivalent of 200% browser zoom on a
+  // 1440px desktop viewport. The responsive layout must not lose content or
+  // introduce horizontal page scrolling at that size.
+  await page.setViewportSize({ width: 720, height: 450 });
+  await expect(page.getByRole("heading", { name: "Codex Observatory" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }))).toEqual({ clientWidth: 720, scrollWidth: 720 });
 });

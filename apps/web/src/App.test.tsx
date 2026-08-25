@@ -96,8 +96,8 @@ describe("dashboard interactions", () => {
 
     const transform = (viewport.querySelector(".graph__canvas") as HTMLElement).style.transform;
     const scale = Number(transform.match(/scale\(([^)]+)\)/)?.[1]);
-    expect(scale).toBeGreaterThan(0.75);
-    expect(scale).toBeLessThan(0.9);
+    expect(scale).toBeGreaterThan(0.65);
+    expect(scale).toBeLessThan(0.8);
   });
 
   it("pans with the wheel and zooms around the pointer with Control-wheel", () => {
@@ -185,7 +185,7 @@ describe("dashboard interactions", () => {
     expect(screen.queryByText("Event 100")).not.toBeInTheDocument();
 
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 256 });
-    fireEvent.scroll(list, { target: { scrollTop: 6_400 } });
+    fireEvent.scroll(list, { target: { scrollTop: 7_600 } });
 
     expect(screen.queryByText("Event 0")).not.toBeInTheDocument();
     expect(screen.getByText("Event 100")).toBeInTheDocument();
@@ -313,7 +313,7 @@ describe("dashboard interactions", () => {
     expect(screen.queryByText("Recent 20")).not.toBeInTheDocument();
 
     Object.defineProperty(list, "clientHeight", { configurable: true, value: 96 });
-    fireEvent.scroll(list, { target: { scrollTop: 640 } });
+    fireEvent.scroll(list, { target: { scrollTop: 800 } });
 
     expect(screen.queryByText("Recent 0")).not.toBeInTheDocument();
     expect(screen.getByText("Recent 20")).toBeInTheDocument();
