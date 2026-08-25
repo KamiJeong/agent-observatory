@@ -10,7 +10,7 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
   AgentActivity,
   AgentRuntimeAdapter,
@@ -78,7 +78,15 @@ export interface ClaudeProcessDiscovery {
   processCount: number;
   exact: boolean;
   source: "procfs" | "unsupported";
+  /** Root transcript paths held open by an interactive Claude process, when observable. */
+  openRootTranscriptPaths?: Set<string>;
   warning?: string;
+}
+
+export interface ClaudeTranscriptCandidate {
+  path: string;
+  cwd?: string;
+  updatedAt?: number;
 }
 
 export interface ClaudeAdapterOptions {
@@ -580,10 +588,16 @@ export function applyClaudeTeamEvidence(
   const results = [...observed];
   const sessionThreads = new Map<string, ObservedClaudeThread>();
   for (const thread of results) {
-    if (thread.snapshot.sessionId) sessionThreads.set(thread.snapshot.sessionId, thread);
+    if (thread.snapshot.sessionId && !thread.snapshot.parentThreadId) {
+      sessionThreads.set(thread.snapshot.sessionId, thread);
+    }
   }
 
   for (const team of teams) {
+    const observedTeamSession = team.members.some((member) => (
+      Boolean(member.sessionId && sessionThreads.has(member.sessionId))
+    )) || Boolean(team.leadSessionId && sessionThreads.has(team.leadSessionId));
+    if (!observedTeamSession) continue;
     const hasMatchingCwd = cwdFilter === "all"
       || team.members.some((member) => member.cwd === cwdFilter)
       || (team.leadSessionId ? sessionThreads.get(team.leadSessionId)?.snapshot.cwd === cwdFilter : false);
@@ -707,9 +721,52 @@ function looksLikeInteractiveClaude(command: string[]): boolean {
   return !commandName || !nonInteractive.has(commandName);
 }
 
+function rootTranscriptPath(path: string): string {
+  const cleaned = path.replace(/ \(deleted\)$/, "");
+  const parent = dirname(cleaned);
+  if (basename(parent) !== "subagents") return cleaned;
+  const sessionDir = dirname(parent);
+  return join(dirname(sessionDir), `${basename(sessionDir)}.jsonl`);
+}
+
+function samePath(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replace(/\/+$/, "") || "/";
+  return normalize(left) === normalize(right);
+}
+
+export function selectActiveClaudeTranscriptPaths(
+  candidates: ClaudeTranscriptCandidate[],
+  discovery: ClaudeProcessDiscovery,
+  cwdFilter: string,
+): Set<string> {
+  const eligible = candidates
+    .filter((candidate) => cwdFilter === "all" || Boolean(candidate.cwd && samePath(candidate.cwd, cwdFilter)))
+    .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+  const openPaths = discovery.openRootTranscriptPaths ?? new Set<string>();
+  const selected = new Set<string>();
+
+  for (const [cwd, count] of discovery.cwdCounts) {
+    const matching = eligible.filter((candidate) => candidate.cwd && samePath(candidate.cwd, cwd));
+    const exact = matching.filter((candidate) => openPaths.has(candidate.path)).slice(0, count);
+    for (const candidate of exact) selected.add(candidate.path);
+    for (const candidate of matching.filter((candidate) => !selected.has(candidate.path)).slice(0, count - exact.length)) {
+      selected.add(candidate.path);
+    }
+  }
+
+  if (!discovery.exact) {
+    const unresolvedCount = Math.max(0, discovery.processCount - selected.size);
+    for (const candidate of eligible.filter((candidate) => !selected.has(candidate.path)).slice(0, unresolvedCount)) {
+      selected.add(candidate.path);
+    }
+  }
+  return selected;
+}
+
 /** Passive process discovery; it never attaches to or mutates a Claude process. */
 export function findInteractiveClaudeCwds(procRoot = "/proc"): ClaudeProcessDiscovery {
   const cwdCounts = new Map<string, number>();
+  const openRootTranscriptPaths = new Set<string>();
   let processCount = 0;
   let entries: string[];
   try {
@@ -720,6 +777,7 @@ export function findInteractiveClaudeCwds(procRoot = "/proc"): ClaudeProcessDisc
       processCount,
       exact: false,
       source: "unsupported",
+      openRootTranscriptPaths,
       warning: "Claude process discovery requires procfs on this platform",
     };
   }
@@ -730,11 +788,21 @@ export function findInteractiveClaudeCwds(procRoot = "/proc"): ClaudeProcessDisc
       processCount += 1;
       const cwd = readlinkSync(join(procRoot, pid, "cwd"));
       if (cwd) cwdCounts.set(cwd, (cwdCounts.get(cwd) ?? 0) + 1);
+      try {
+        for (const fd of readdirSync(join(procRoot, pid, "fd"))) {
+          const target = readlinkSync(join(procRoot, pid, "fd", fd));
+          if (target.replace(/ \(deleted\)$/, "").endsWith(".jsonl")) {
+            openRootTranscriptPaths.add(rootTranscriptPath(target));
+          }
+        }
+      } catch {
+        // Some systems restrict process file-descriptor inspection; cwd fallback remains available.
+      }
     } catch {
       // Processes can disappear between directory enumeration and inspection.
     }
   }
-  return { cwdCounts, processCount, exact: true, source: "procfs" };
+  return { cwdCounts, processCount, exact: true, source: "procfs", openRootTranscriptPaths };
 }
 
 function cliVersion(): string {
@@ -748,6 +816,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   readonly mode = "claude" as const;
   #listeners = new Set<(event: AgentRuntimeEvent) => void>();
   #threads = new Map<string, ObservedClaudeThread>();
+  #emittedThreads = new Map<string, ObservedClaudeThread>();
   #seenActivities = new Set<string>();
   #seenHistory = new Set<string>();
   #seenRequests = new Set<string>();
@@ -863,14 +932,21 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
 
   async #refresh(emit: boolean): Promise<void> {
     const processDiscovery = this.#processDiscovery();
-    const observed = this.#scanTranscripts(processDiscovery.cwdCounts);
+    const observed = this.#scanTranscripts(processDiscovery);
     this.#threads = new Map(observed.map((thread) => [thread.snapshot.id, thread]));
     if (!emit) return;
+    const observedIds = new Set(this.#threads.keys());
+    for (const [id, thread] of this.#emittedThreads) {
+      if (observedIds.has(id)) continue;
+      this.#forgetThreadEvidence(thread);
+      this.#emit({ type: "thread.removed", at: this.#now(), threadId: id });
+    }
     for (const thread of observed) this.#emitThread(thread);
+    this.#emittedThreads = new Map(observed.map((thread) => [thread.snapshot.id, thread]));
     if (processDiscovery.warning) this.#debug(processDiscovery.warning);
   }
 
-  #scanTranscripts(activeCwds: Map<string, number>): ObservedClaudeThread[] {
+  #scanTranscripts(processDiscovery: ClaudeProcessDiscovery): ObservedClaudeThread[] {
     const projectsRoot = join(this.#claudeHome, "projects");
     let projectDirs: string[];
     try {
@@ -880,7 +956,11 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
     } catch {
       projectDirs = [];
     }
-    const results: ObservedClaudeThread[] = [];
+    const candidates: Array<ClaudeTranscriptCandidate & {
+      projectDir: string;
+      sessionId: string;
+      rootTail: { text: string; stat: Stats };
+    }> = [];
     for (const projectDir of projectDirs) {
       let files: string[];
       try {
@@ -898,69 +978,91 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           continue;
         }
         const sessionId = this.#sessionId(rootTail.text) ?? fallbackSessionId;
-        const rootId = namespaceRoot(sessionId);
         const fallbackCwd = this.#transcriptCwd(rootTail.text);
-        if (this.#cwd !== "all" && fallbackCwd !== this.#cwd) continue;
-        const processActive = fallbackCwd ? (activeCwds.get(fallbackCwd) ?? 0) > 0 : false;
-        const root = parseClaudeTranscript(rootTail.text, {
-          threadId: rootId,
+        candidates.push({
+          path,
+          projectDir,
           sessionId,
-          fallbackCwd,
-          isRoot: true,
-          processActive,
-          createdAt: rootTail.stat.birthtimeMs || undefined,
+          rootTail,
+          ...(fallbackCwd ? { cwd: fallbackCwd } : {}),
           updatedAt: rootTail.stat.mtimeMs,
-          captureContent: this.#captureContent,
         });
-        results.push({ ...root, path });
+      }
+    }
 
-        const subagentsDir = join(projectDir, sessionId, "subagents");
-        let agentFiles: string[];
+    const selectedPaths = selectActiveClaudeTranscriptPaths(candidates, processDiscovery, this.#cwd);
+    const results: ObservedClaudeThread[] = [];
+    for (const candidate of candidates) {
+      if (!selectedPaths.has(candidate.path)) continue;
+      const { path, projectDir, sessionId, rootTail } = candidate;
+      const fallbackCwd = candidate.cwd;
+      const rootId = namespaceRoot(sessionId);
+      const processActive = true;
+      const root = parseClaudeTranscript(rootTail.text, {
+        threadId: rootId,
+        sessionId,
+        fallbackCwd,
+        isRoot: true,
+        processActive,
+        createdAt: rootTail.stat.birthtimeMs || undefined,
+        updatedAt: rootTail.stat.mtimeMs,
+        captureContent: this.#captureContent,
+      });
+      results.push({ ...root, path });
+
+      const subagentsDir = join(projectDir, sessionId, "subagents");
+      let agentFiles: string[];
+      try {
+        agentFiles = readdirSync(subagentsDir).filter((name) => name.startsWith("agent-") && name.endsWith(".jsonl"));
+      } catch {
+        continue;
+      }
+      const parsedAgents: Array<{ observed: ObservedClaudeThread; meta?: ClaudeSubagentMeta }> = [];
+      for (const agentFile of agentFiles) {
+        const agentPath = join(subagentsDir, agentFile);
+        const nativeAgentId = agentFile.slice(0, -".jsonl".length);
+        const threadId = namespaceSubagent(sessionId, nativeAgentId);
+        let tail: ReturnType<typeof readTail>;
         try {
-          agentFiles = readdirSync(subagentsDir).filter((name) => name.startsWith("agent-") && name.endsWith(".jsonl"));
+          tail = readTail(agentPath);
         } catch {
           continue;
         }
-        const parsedAgents: Array<{ observed: ObservedClaudeThread; meta?: ClaudeSubagentMeta }> = [];
-        for (const agentFile of agentFiles) {
-          const agentPath = join(subagentsDir, agentFile);
-          const nativeAgentId = agentFile.slice(0, -".jsonl".length);
-          const threadId = namespaceSubagent(sessionId, nativeAgentId);
-          let tail: ReturnType<typeof readTail>;
-          try {
-            tail = readTail(agentPath);
-          } catch {
-            continue;
-          }
-          const meta = parseSubagentMeta(join(subagentsDir, `${nativeAgentId}.meta.json`));
-          const parsed = parseClaudeTranscript(tail.text, {
-            threadId,
-            sessionId,
-            parentThreadId: rootId,
-            fallbackCwd,
-            isRoot: false,
-            processActive,
-            createdAt: tail.stat.birthtimeMs || undefined,
-            updatedAt: tail.stat.mtimeMs,
-            meta,
-            captureContent: this.#captureContent,
-          });
-          parsedAgents.push({ observed: { ...parsed, path: agentPath }, meta });
-        }
+        const meta = parseSubagentMeta(join(subagentsDir, `${nativeAgentId}.meta.json`));
+        const parsed = parseClaudeTranscript(tail.text, {
+          threadId,
+          sessionId,
+          parentThreadId: rootId,
+          fallbackCwd,
+          isRoot: false,
+          processActive,
+          createdAt: tail.stat.birthtimeMs || undefined,
+          updatedAt: tail.stat.mtimeMs,
+          meta,
+          captureContent: this.#captureContent,
+        });
+        parsedAgents.push({ observed: { ...parsed, path: agentPath }, meta });
+      }
 
-        const toolOwner = new Map<string, string>();
-        for (const id of root.toolUseIds) toolOwner.set(id, rootId);
-        for (const { observed } of parsedAgents) {
-          for (const id of observed.toolUseIds) toolOwner.set(id, observed.snapshot.id);
-        }
-        for (const { observed, meta } of parsedAgents) {
-          const parent = meta?.toolUseId ? toolOwner.get(meta.toolUseId) : undefined;
-          if (parent && parent !== observed.snapshot.id) observed.snapshot.parentThreadId = parent;
-          results.push(observed);
-        }
+      const toolOwner = new Map<string, string>();
+      for (const id of root.toolUseIds) toolOwner.set(id, rootId);
+      for (const { observed } of parsedAgents) {
+        for (const id of observed.toolUseIds) toolOwner.set(id, observed.snapshot.id);
+      }
+      for (const { observed, meta } of parsedAgents) {
+        const parent = meta?.toolUseId ? toolOwner.get(meta.toolUseId) : undefined;
+        if (parent && parent !== observed.snapshot.id) observed.snapshot.parentThreadId = parent;
+        results.push(observed);
       }
     }
     return applyClaudeTeamEvidence(results, discoverClaudeAgentTeams(this.#claudeHome), this.#cwd);
+  }
+
+  #forgetThreadEvidence(thread: ObservedClaudeThread): void {
+    for (const activity of thread.activities) this.#seenActivities.delete(activity.id);
+    for (const history of thread.history) this.#seenHistory.delete(history.id);
+    for (const request of thread.pendingRequests) this.#seenRequests.delete(request.id);
+    this.#lifecycle.delete(thread.snapshot.id);
   }
 
   #sessionId(text: string): string | undefined {

@@ -255,6 +255,35 @@ export function reduceEvent(
       }
       break;
     }
+    case "thread.removed": {
+      const removedIds = new Set([event.threadId]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const agent of Object.values(state.agents)) {
+          if (agent.parentId && removedIds.has(agent.parentId) && !removedIds.has(agent.id)) {
+            removedIds.add(agent.id);
+            changed = true;
+          }
+        }
+      }
+      next.agents = rebuildChildren(Object.fromEntries(
+        Object.entries(state.agents).filter(([id]) => !removedIds.has(id)),
+      ));
+      next.activities = state.activities.filter((activity) => !removedIds.has(activity.agentId));
+      next.history = state.history.filter((history) => {
+        const actorRemoved = history.actor.type === "agent" && Boolean(history.actor.id && removedIds.has(history.actor.id));
+        const recipientRemoved = (history.recipients ?? []).some((recipient) => (
+          recipient.type === "agent" && Boolean(recipient.id && removedIds.has(recipient.id))
+        ));
+        return !actorRemoved && !recipientRemoved;
+      });
+      next.pendingRequests = Object.fromEntries(
+        Object.entries(state.pendingRequests).filter(([, request]) => !removedIds.has(request.agentId)),
+      );
+      if (state.selectedAgentId && removedIds.has(state.selectedAgentId)) next.selectedAgentId = undefined;
+      break;
+    }
     case "thread.status": {
       const previous = ensureAgent(state, event.threadId, event.at, provider);
       const projected = projectNativeStatus(event.status);

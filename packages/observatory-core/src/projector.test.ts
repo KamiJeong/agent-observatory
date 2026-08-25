@@ -156,6 +156,39 @@ describe("graph construction", () => {
 });
 
 describe("bounded event state", () => {
+  it("removes a vanished thread subtree and its live-session evidence", () => {
+    let state = createInitialState(runtime, 1);
+    state = reduceEvent(state, {
+      type: "thread.discovered",
+      at: 2,
+      thread: { id: "root", nativeStatus: { type: "active", activeFlags: [] } },
+    });
+    state = reduceEvent(state, {
+      type: "thread.discovered",
+      at: 3,
+      thread: { id: "child", parentThreadId: "root", nativeStatus: { type: "active", activeFlags: [] } },
+    });
+    state = reduceEvent(state, {
+      type: "activity.started",
+      at: 4,
+      activity: { id: "child-work", agentId: "child", kind: "read", title: "Reading", startedAt: 4 },
+    });
+    state = reduceEvent(state, {
+      type: "request.opened",
+      at: 5,
+      request: { id: "child-input", agentId: "child", reason: "userInput", title: "Input", openedAt: 5 },
+    });
+    state = { ...state, selectedAgentId: "child" };
+
+    state = reduceEvent(state, { type: "thread.removed", at: 6, threadId: "root" });
+
+    expect(state.agents).toEqual({});
+    expect(state.activities).toEqual([]);
+    expect(state.history).toEqual([]);
+    expect(state.pendingRequests).toEqual({});
+    expect(state.selectedAgentId).toBeUndefined();
+  });
+
   it("caps activity accumulation", () => {
     let state = createInitialState(runtime, 1);
     for (let index = 0; index < 8; index += 1) {

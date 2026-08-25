@@ -9,6 +9,8 @@ The implementation has been verified against Claude Code 2.1.241 and tolerates
 unknown or malformed JSONL records. It currently observes:
 
 - interactive process working directories from Linux procfs;
+- root transcript file descriptors exposed by Linux procfs when Claude keeps
+  them open;
 - root transcripts at `~/.claude/projects/<encoded-project>/<session>.jsonl`;
 - subagent transcripts and metadata under
   `<session>/subagents/agent-*.{jsonl,meta.json}`.
@@ -16,6 +18,21 @@ unknown or malformed JSONL records. It currently observes:
 These paths and record shapes are compatibility inputs, not a public Claude Code
 API. The parser therefore ignores fields it does not understand and uses the
 `compatibility` evidence label.
+
+## Live-session selection
+
+The live graph never loads every transcript for a matching project directory.
+For each interactive Claude process, the adapter first selects a root transcript
+that appears in `/proc/<pid>/fd`. An open subagent transcript is resolved back to
+its owning root. When Claude does not keep a transcript descriptor open, the
+adapter selects the newest root transcript for that process cwd. N processes in
+one cwd select at most N roots.
+
+Only selected roots and their transcript subagents are parsed. Agent Team
+metadata is applied only when a selected root session anchors that team. When a
+process exits, the root subtree and its projected activity, narrative history,
+and pending requests are removed from the live state. Transcript files are never
+deleted or modified.
 
 ## Agent teams beta
 
@@ -78,11 +95,11 @@ removed from the current roster, preventing that member from remaining working.
 
 ## Privacy boundary
 
-Prompt text, response text, thinking, commands, paths from tool inputs, tool
-results, and subagent descriptions are not copied into Observatory events. The
-adapter emits generic request, response, and tool labels plus timing, lifecycle,
-model, and token metadata. Content capture would require a separate explicit
-opt-in design.
+Bounded prompt and final-response text is copied only when the runtime content
+capture policy is enabled. Thinking, commands, paths from tool inputs, tool
+results, and subagent descriptions are never copied into Observatory events.
+Without content capture, the adapter emits generic request, response, and tool
+labels plus timing, lifecycle, model, and token metadata.
 
 The same boundary applies to agent teams. Team descriptions, teammate prompts,
 task subjects/descriptions/active forms, mailbox text and summaries, idle
@@ -101,8 +118,11 @@ working directory.
 
 ## Known limits and future enrichment
 
-- Process discovery is exact on Linux procfs. Other platforms currently fall
-  back to transcript-only historical discovery.
+- Process and cwd discovery is exact on Linux procfs; transcript file-descriptor
+  matching is best-effort because Claude may open files only while writing.
+- Other platforms do not currently expose Claude sessions in the live graph
+  because reliable process matching is not implemented. Historical transcripts
+  are deliberately not used as a substitute for live state.
 - Root idle/working and subagent completion are inferred from transcript tails;
   unsupported records remain unknown/idle instead of inventing activity.
 - Very large transcripts are read from a bounded tail, so token totals represent

@@ -36,4 +36,17 @@ describe("runtime namespaces", () => {
       },
     });
   });
+
+  it("namespaces removed thread identifiers", () => {
+    expect(namespaceRuntimeEvent("claude", {
+      type: "thread.removed",
+      at: 2,
+      threadId: "root",
+    })).toEqual({
+      type: "thread.removed",
+      at: 2,
+      provider: "claude",
+      threadId: "claude:root",
+    });
+  });
 });
