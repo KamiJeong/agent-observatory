@@ -96,11 +96,17 @@ code {
   align-items: center;
   border: 1px solid var(--line-strong);
   display: inline-flex;
-  font-family: ui-monospace, monospace;
-  font-size: var(--font-page);
+  flex: 0 0 36px;
   height: 36px;
   justify-content: center;
   width: 36px;
+}
+.brand__mark::before {
+  background: var(--text);
+  content: "";
+  height: 28px;
+  mask: url("/agent-observatory.svg") center / contain no-repeat;
+  width: 28px;
 }
 .brand h1 { font-size: var(--font-section); letter-spacing: -.01em; line-height: 1.1; margin: 0; }
 .brand div > span { color: var(--text-muted); font-size: var(--font-caption); letter-spacing: .06em; text-transform: uppercase; }
