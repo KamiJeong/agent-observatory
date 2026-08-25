@@ -74,8 +74,10 @@ bunx agent-observatory --scenario stress --no-open
 
 우선 사용하는 기본 주소는 <http://127.0.0.1:4317>입니다. 해당 포트가 이미 사용
 중이면 CLI가 다음 가용 포트를 선택하고 최종 bootstrap URL을 출력합니다. 사용자가
-`--port`를 명시한 경우에는 조용히 다른 포트로 변경하지 않습니다. 모든 옵션은
-`bunx agent-observatory --help`로 확인할 수 있습니다.
+`--port`를 명시한 경우에는 조용히 다른 포트로 변경하지 않습니다. API와 번들 Web
+UI는 선택된 동일 origin을 사용하므로 proxy를 다시 설정할 필요가 없습니다. WSL에서는
+Windows 브라우저 연결을 통해 URL을 엽니다. 모든 옵션은 `bunx agent-observatory
+--help`로 확인할 수 있습니다.
 
 ### 패키지 레지스트리
 

@@ -10,7 +10,17 @@ export interface RuntimeConfiguration {
   providers?: string;
 }
 
+export interface BrowserCommand {
+  file: string;
+  args: string[];
+}
+
 export function resolveRuntimeConfiguration(values: RuntimeValues): RuntimeConfiguration;
+export function browserCommand(
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+  target: string,
+): BrowserCommand;
 export function portIsAvailable(port: number, host?: string): Promise<boolean>;
 export function selectAvailablePort(
   preferredPort: number,

@@ -22,6 +22,15 @@ export function resolveRuntimeConfiguration(values) {
   };
 }
 
+export function browserCommand(platform, environment, target) {
+  if (platform === "darwin") return { file: "open", args: [target] };
+  if (platform === "win32") return { file: "cmd", args: ["/c", "start", "", target] };
+  if (environment.WSL_INTEROP || environment.WSL_DISTRO_NAME) {
+    return { file: "cmd.exe", args: ["/c", "start", "", target] };
+  }
+  return { file: "xdg-open", args: [target] };
+}
+
 export function portIsAvailable(port, host = "127.0.0.1") {
   return new Promise((resolve) => {
     const server = createServer();

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { resolveRuntimeConfiguration, selectAvailablePort } from "./cli-runtime.js";
+import { browserCommand, resolveRuntimeConfiguration, selectAvailablePort } from "./cli-runtime.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `agent-observatory ${packageJson.version}
@@ -76,7 +76,7 @@ if (values.open && values["no-open"]) {
   process.exit(1);
 }
 
-const preferredPort = Number(values.port ?? 4317);
+const preferredPort = Number(values.port ?? process.env.OBSERVATORY_PORT ?? 4317);
 if (!Number.isInteger(preferredPort) || preferredPort < 1 || preferredPort > 65_535) {
   console.error(`Invalid port: ${values.port ?? ""}`);
   process.exit(1);
@@ -131,14 +131,10 @@ const accessToken = randomBytes(32).toString("base64url");
 process.env.OBSERVATORY_ACCESS_TOKEN = accessToken;
 const baseUrl = `http://127.0.0.1:${port}`;
 const url = `${baseUrl}/?token=${encodeURIComponent(accessToken)}`;
-const shouldOpen = values.open || (!values["no-open"] && process.stdout.isTTY && !process.env.CI);
+const shouldOpen = values.open || (!values["no-open"] && !process.env.CI);
 
 function openBrowser(target) {
-  const command = process.platform === "darwin"
-    ? { file: "open", args: [target] }
-    : process.platform === "win32"
-      ? { file: "cmd", args: ["/c", "start", "", target] }
-      : { file: "xdg-open", args: [target] };
+  const command = browserCommand(process.platform, process.env, target);
   const reportFailure = () => {
     console.warn(`Could not open a browser automatically. Open ${target} manually.`);
   };
