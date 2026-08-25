@@ -4,8 +4,10 @@ const env = {
   ...process.env,
   OBSERVATORY_ADAPTER: "real",
   OBSERVATORY_LAUNCH_CWD: process.cwd(),
+  OBSERVATORY_CAPTURE_CONTENT: process.env.OBSERVATORY_CAPTURE_CONTENT ?? "1",
 };
 let openPreference;
+let capturePreference;
 const optionToEnvironment = new Map([
   ["--cwd", "OBSERVATORY_CWD"],
   ["--root-thread", "OBSERVATORY_ROOT_THREAD_ID"],
@@ -23,15 +25,21 @@ for (let index = 2; index < process.argv.length; index += 1) {
     openPreference = nextPreference;
     continue;
   }
-  if (option === "--capture-content") {
-    env.OBSERVATORY_CAPTURE_CONTENT = "1";
+  if (option === "--capture-content" || option === "--no-capture-content") {
+    const nextPreference = option === "--capture-content";
+    if (capturePreference !== undefined && capturePreference !== nextPreference) {
+      console.error("Use either --capture-content or --no-capture-content, not both.");
+      process.exit(1);
+    }
+    capturePreference = nextPreference;
+    env.OBSERVATORY_CAPTURE_CONTENT = nextPreference ? "1" : "0";
     continue;
   }
   const environmentName = optionToEnvironment.get(option);
   const value = process.argv[index + 1];
   if (!environmentName || !value) {
     console.error(`Unknown or incomplete Real Mode option: ${option}`);
-    console.error("Use --cwd <path|all>, --root-thread <id>, --transport <mode>, --provider <codex|claude|codex,claude>, or --capture-content.");
+    console.error("Use --cwd <path|all>, --root-thread <id>, --transport <mode>, --provider <codex|claude|codex,claude>, --capture-content, or --no-capture-content.");
     process.exit(1);
   }
   env[environmentName] = value;

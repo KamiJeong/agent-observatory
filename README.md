@@ -340,19 +340,20 @@ Environment options:
 | `OBSERVATORY_ROOT_THREAD_ID` | unset | Include one root plus its descendants |
 | `OBSERVATORY_CODEX_TRANSPORT` | `shared` | `shared`, `standalone`, or experimental `proxy` |
 | `OBSERVATORY_SCENARIO` | `a` | Mock fixture: `a`, `b`, `demo`, or `stress` |
-| `OBSERVATORY_CAPTURE_CONTENT` | unset | Set to `1` to expose bounded provider content in the local browser; metadata-only by default |
+| `OBSERVATORY_CAPTURE_CONTENT` | `1` in `dev:real`; unset in the server | Expose bounded provider content in the local browser; set to `0` for metadata-only mode |
 
 Example:
 
 ```bash
 bun run dev:real -- --root-thread 019f...
 bun run dev:real -- --provider codex,claude
-bun run dev:real -- --capture-content
+bun run dev:real -- --no-capture-content
 ```
 
-`--capture-content` enables bounded Human request and agent response text for the
-local dashboard. Tool inputs, thinking, commands, paths, and tool-result bodies
-remain excluded; omit the flag to keep Story in metadata-only mode.
+`dev:real` includes bounded Human request and agent response text by default.
+Tool inputs, thinking, commands, paths, and tool-result bodies remain excluded.
+Use `--no-capture-content` (or `OBSERVATORY_CAPTURE_CONTENT=0`) when the local
+dashboard should remain in metadata-only mode.
 
 ### Real-time observation boundary
 
