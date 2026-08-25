@@ -82,6 +82,7 @@ export interface ClaudeProcessDiscovery {
 export interface ClaudeAdapterOptions {
   claudeHome?: string;
   cwd?: string;
+  environment?: NodeJS.ProcessEnv;
   pollIntervalMs?: number;
   now?: () => number;
   processDiscovery?: () => ClaudeProcessDiscovery;
@@ -741,8 +742,13 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   readonly #processDiscovery: () => ClaudeProcessDiscovery;
 
   constructor(options: ClaudeAdapterOptions = {}) {
+    const environment = options.environment ?? process.env;
     this.#claudeHome = options.claudeHome ?? join(homedir(), ".claude");
-    this.#cwd = options.cwd ?? process.env.OBSERVATORY_CWD ?? process.env.INIT_CWD ?? process.cwd();
+    this.#cwd = options.cwd
+      ?? environment.OBSERVATORY_CWD
+      ?? environment.OBSERVATORY_LAUNCH_CWD
+      ?? environment.INIT_CWD
+      ?? process.cwd();
     this.#pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.#now = options.now ?? Date.now;
     this.#processDiscovery = options.processDiscovery ?? findInteractiveClaudeCwds;

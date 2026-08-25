@@ -1,11 +1,11 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const launcherPath = join(repositoryRoot, "scripts", "run-dev-real.mjs");
 const temporaryDirectories: string[] = [];
 
@@ -15,7 +15,7 @@ function runLauncher(args: string[] = [], providers?: string) {
   const fakeBun = join(binDirectory, "bun");
   writeFileSync(fakeBun, [
     "#!/bin/sh",
-    "printf '{\"providers\":\"%s\",\"adapter\":\"%s\",\"args\":\"%s\"}\\n' \"$OBSERVATORY_PROVIDERS\" \"$OBSERVATORY_ADAPTER\" \"$*\"",
+    "printf '{\"providers\":\"%s\",\"adapter\":\"%s\",\"launchCwd\":\"%s\",\"cwdFilter\":\"%s\",\"args\":\"%s\"}\\n' \"$OBSERVATORY_PROVIDERS\" \"$OBSERVATORY_ADAPTER\" \"$OBSERVATORY_LAUNCH_CWD\" \"$OBSERVATORY_CWD\" \"$*\"",
   ].join("\n"));
   chmodSync(fakeBun, 0o755);
 
@@ -47,7 +47,13 @@ describe("dev:real launcher", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Real Mode providers: codex,claude");
-    expect(result.payload).toEqual({ providers: "codex,claude", adapter: "real", args: "run dev" });
+    expect(result.payload).toEqual({
+      providers: "codex,claude",
+      adapter: "real",
+      launchCwd: repositoryRoot,
+      cwdFilter: "",
+      args: "run dev",
+    });
   });
 
   it.each(["codex", "claude", "codex,claude"])("preserves the explicit %s CLI provider override", (providers) => {

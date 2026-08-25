@@ -793,8 +793,9 @@ var ClaudeCodeAdapter = class {
   #now;
   #processDiscovery;
   constructor(options = {}) {
+    const environment = options.environment ?? process.env;
     this.#claudeHome = options.claudeHome ?? join2(homedir(), ".claude");
-    this.#cwd = options.cwd ?? process.env.OBSERVATORY_CWD ?? process.env.INIT_CWD ?? process.cwd();
+    this.#cwd = options.cwd ?? environment.OBSERVATORY_CWD ?? environment.OBSERVATORY_LAUNCH_CWD ?? environment.INIT_CWD ?? process.cwd();
     this.#pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.#now = options.now ?? Date.now;
     this.#processDiscovery = options.processDiscovery ?? findInteractiveClaudeCwds;
