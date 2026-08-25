@@ -102,7 +102,8 @@ bun run dev:real -- --cwd /absolute/path/to/project
 - **Agents**: Parent/child tree, status, role, model/effort, and skill/workflow evidence
 - **Agent Graph**: Root and subagent topology, pan/zoom/fit, and node selection
 - **Workflow Board**: Agent lanes grouped by observed workflow, sortable by Started/Status/Updated
-- **Activity**: Virtualized timeline with filters for tool, command, file, test, and error events
+- **Run History**: Human-readable request, decision, handoff, delivery, and completion story with agent lanes
+- **Trace**: Virtualized low-level timeline with tool, command, file, test, and error filters
 - **Inspector**: Runtime metadata and virtualized recent activity for the selected agent
 - **Debug**: Protocol events, normalized events, and connection/version diagnostics
 
@@ -161,6 +162,8 @@ bounded debug buffer, and unknown methods do not crash the dashboard.
 - Agent list, graph nodes, and Inspector expose observed model and reasoning effort
 - Observed skill/workflow context with Agent filters and per-node markers
 - Evidence-based Workflow Board with observed-order/status/update sorting
+- Human/agent run history with explicit sender, recipients, message content, and completion state
+- Story, Messages, and low-level Trace views with Git-style agent lanes
 - Inspector with virtualized recent activity, thread, cwd, and optional token usage
 - Virtualized activity timeline with filters and a 300-event memory bound
 - Explicit approval and user-input waiting reasons

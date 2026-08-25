@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ObservatorySnapshot } from "@observatory/core";
-import { ActivityTimeline, AgentGraph, AgentList, RecentActivityList, RightRail, WorkflowBoard } from "./App.tsx";
+import { ActivityTimeline, AgentGraph, AgentList, RecentActivityList, RightRail, RunHistory, WorkflowBoard } from "./App.tsx";
 
 beforeAll(() => {
   class ResizeObserverMock {
@@ -32,6 +32,7 @@ const snapshot: ObservatorySnapshot = {
   activities: [{
     id: "test", agentId: "tester", kind: "test", title: "Running vitest", detail: "bun run test", startedAt: 100,
   }],
+  history: [],
   pendingRequests: {},
   connection: { phase: "connected", attempt: 0 },
   runtime: { adapter: "mock", observatoryVersion: "test", experimentalApi: false, discoveryStrategy: "mock" },
@@ -189,6 +190,74 @@ describe("dashboard interactions", () => {
     expect(screen.queryByText("Event 0")).not.toBeInTheDocument();
     expect(screen.getByText("Event 100")).toBeInTheDocument();
     expect(list.querySelectorAll(".timeline-item").length).toBeLessThan(20);
+  });
+
+  it("renders a chronological human and agent narrative with message routes", () => {
+    render(<RunHistory snapshot={{
+      ...snapshot,
+      history: [
+        {
+          id: "decision",
+          kind: "decision",
+          actor: { type: "agent", id: "root" },
+          summary: "Plan updated",
+          content: "Inspect, implement, verify",
+          status: "completed",
+          occurredAt: 200,
+          source: "protocol",
+        },
+        {
+          id: "handoff",
+          kind: "handoff",
+          actor: { type: "agent", id: "root" },
+          recipients: [{ type: "agent", id: "tester" }],
+          summary: "Sent message",
+          content: "Verify the browser flow",
+          status: "sent",
+          occurredAt: 300,
+          source: "protocol",
+        },
+        {
+          id: "request",
+          kind: "request",
+          actor: { type: "human" },
+          recipients: [{ type: "agent", id: "root" }],
+          summary: "Request received",
+          content: "Review authentication",
+          status: "completed",
+          occurredAt: 100,
+          source: "protocol",
+        },
+      ],
+    }} />);
+
+    const events = screen.getByRole("list", { name: "Run history, 3 events" });
+    expect([...events.querySelectorAll(".history-event__summary")].map((node) => node.textContent))
+      .toEqual(["Request received", "Plan updated", "Sent message"]);
+    expect(screen.getByText("Verify the browser flow")).toBeInTheDocument();
+    expect(events.querySelector(".history-event__route")?.textContent).toContain("Human→Main");
+    expect(events.querySelectorAll(".history-event__route")[2]?.textContent).toContain("Main→Tester");
+  });
+
+  it("switches the right rail between narrative messages and low-level trace", () => {
+    render(<RightRail snapshot={{
+      ...snapshot,
+      history: [{
+        id: "message",
+        kind: "handoff",
+        actor: { type: "agent", id: "root" },
+        recipients: [{ type: "agent", id: "tester" }],
+        summary: "Sent message",
+        status: "sent",
+        occurredAt: 100,
+        source: "protocol",
+      }],
+    }} onClear={() => undefined} now={5_000} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Messages" }));
+    expect(screen.getByRole("list", { name: "Messages, 1 events" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+    expect(screen.getByRole("list", { name: "Recent activity, 1 events" })).toBeInTheDocument();
   });
 
   it("groups agents into evidence-based workflow lanes", () => {

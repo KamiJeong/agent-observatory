@@ -5,6 +5,7 @@ type Listener = () => void;
 const emptySnapshot: ObservatorySnapshot = {
   agents: {},
   activities: [],
+  history: [],
   pendingRequests: {},
   connection: { phase: "connecting", attempt: 0, message: "Connecting to local backend" },
   runtime: {

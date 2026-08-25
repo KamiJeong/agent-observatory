@@ -1,8 +1,11 @@
 import type {
+  AgentActivity,
   AgentGraphEdge,
   AgentNode,
   AgentRuntimeStatus,
   CodexRuntimeEvent,
+  HistoryActor,
+  HistoryEvent,
   NativeThreadStatus,
   ObservatorySnapshot,
   ObservatoryState,
@@ -12,6 +15,7 @@ import type {
 } from "./types.ts";
 
 export const DEFAULT_ACTIVITY_LIMIT = 300;
+export const DEFAULT_HISTORY_LIMIT = 500;
 export const DEFAULT_DEBUG_LIMIT = 150;
 const RECENT_ACTIVITY_LIMIT = 30;
 
@@ -46,6 +50,7 @@ export function createInitialState(runtime: RuntimeInfo, now = Date.now()): Obse
   return {
     agents: {},
     activities: [],
+    history: [],
     pendingRequests: {},
     connection: { phase: "connecting", attempt: 0 },
     runtime,
@@ -121,11 +126,53 @@ function rebuildChildren(agents: Record<string, AgentNode>): Record<string, Agen
   return next;
 }
 
+function agentActor(id: string): HistoryActor {
+  return { type: "agent", id };
+}
+
+function recordHistory(state: ObservatoryState, history: HistoryEvent, limit: number): HistoryEvent[] {
+  return [history, ...state.history.filter((item) => item.id !== history.id)].slice(0, limit);
+}
+
+function boundedHistoryContent(content: string | undefined): string | undefined {
+  if (!content) return undefined;
+  return content.length > 2_000 ? `${content.slice(0, 1_999)}…` : content;
+}
+
+function resolveHistoryRecipients(state: ObservatoryState, history: HistoryEvent): HistoryEvent {
+  if (history.kind !== "delivery" || history.actor.type !== "agent" || !history.actor.id) return history;
+  if (history.recipients?.length !== 1 || history.recipients[0]?.type !== "human") return history;
+  const parentId = state.agents[history.actor.id]?.parentId;
+  return parentId ? { ...history, recipients: [agentActor(parentId)] } : history;
+}
+
+function activityHistory(activity: AgentActivity, status: HistoryEvent["status"]): HistoryEvent | undefined {
+  if (activity.kind === "approval") return undefined;
+  const content = boundedHistoryContent(activity.detail);
+  return {
+    id: `activity:${activity.id}`,
+    kind: activity.kind === "message" ? "delivery" : "work",
+    actor: agentActor(activity.agentId),
+    ...(activity.kind === "message" ? { recipients: [{ type: "human" as const }] } : {}),
+    summary: activity.title,
+    ...(content ? { content } : {}),
+    status,
+    correlationId: activity.id,
+    occurredAt: activity.startedAt,
+    source: "derived",
+  };
+}
+
 export function reduceEvent(
   state: ObservatoryState,
   event: CodexRuntimeEvent,
-  limits = { activities: DEFAULT_ACTIVITY_LIMIT, debug: DEFAULT_DEBUG_LIMIT },
+  limits: { activities: number; debug: number; history?: number } = {
+    activities: DEFAULT_ACTIVITY_LIMIT,
+    debug: DEFAULT_DEBUG_LIMIT,
+    history: DEFAULT_HISTORY_LIMIT,
+  },
 ): ObservatoryState {
+  const historyLimit = limits.history ?? DEFAULT_HISTORY_LIMIT;
   let next: ObservatoryState = {
     ...state,
     agents: { ...state.agents },
@@ -152,6 +199,20 @@ export function reduceEvent(
         next.agents[event.thread.id] = discovered;
       }
       next.agents = rebuildChildren(next.agents);
+      if (event.thread.parentThreadId) {
+        next.history = recordHistory(state, {
+          id: `spawn:${event.thread.id}`,
+          kind: "handoff",
+          actor: agentActor(event.thread.parentThreadId),
+          recipients: [{ type: "agent", id: event.thread.id, label: event.thread.nickname }],
+          summary: `Started ${event.thread.nickname ?? event.thread.role ?? "subagent"}`,
+          ...(event.thread.role ? { content: event.thread.role } : {}),
+          status: "started",
+          correlationId: event.thread.id,
+          occurredAt: event.at,
+          source: "derived",
+        }, historyLimit);
+      }
       break;
     }
     case "thread.status": {
@@ -197,6 +258,19 @@ export function reduceEvent(
         Object.assign(mapped, { status: "idle", waitingReasons: [] });
       }
       next.agents[event.threadId] = { ...previous, ...mapped };
+      if (["completed", "errored", "interrupted"].includes(event.status)) {
+        const failed = event.status === "errored";
+        next.history = recordHistory(state, {
+          id: `lifecycle:${event.threadId}:${event.status}:${event.at}`,
+          kind: "completion",
+          actor: agentActor(event.threadId),
+          summary: failed ? "Agent failed" : event.status === "interrupted" ? "Agent interrupted" : "Agent completed work",
+          ...(event.message ? { content: event.message } : {}),
+          status: failed ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
+          occurredAt: event.at,
+          source: "derived",
+        }, historyLimit);
+      }
       break;
     }
     case "turn.started": {
@@ -210,6 +284,17 @@ export function reduceEvent(
         completedAt: undefined,
         updatedAt: event.at,
       };
+      next.history = recordHistory(state, {
+        id: `turn:${event.turnId}`,
+        kind: "work",
+        actor: agentActor(event.threadId),
+        summary: "Started work",
+        status: "running",
+        turnId: event.turnId,
+        correlationId: event.turnId,
+        occurredAt: event.at,
+        source: "derived",
+      }, historyLimit);
       break;
     }
     case "turn.completed": {
@@ -226,6 +311,19 @@ export function reduceEvent(
         currentActivityId: undefined,
         updatedAt: event.at,
       };
+      next.history = recordHistory(state, {
+        id: `turn-completed:${event.turnId}`,
+        kind: "completion",
+        actor: agentActor(event.threadId),
+        summary: event.status === "failed" ? "Work failed" : event.status === "interrupted" ? "Work interrupted" : "Work completed",
+        ...(event.error ? { content: event.error } : {}),
+        status: event.status === "failed" ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
+        turnId: event.turnId,
+        correlationId: event.turnId,
+        parentEventId: `turn:${event.turnId}`,
+        occurredAt: event.at,
+        source: "derived",
+      }, historyLimit);
       break;
     }
     case "activity.started": {
@@ -243,6 +341,8 @@ export function reduceEvent(
         ].slice(0, RECENT_ACTIVITY_LIMIT),
         updatedAt: event.at,
       };
+      const startedHistory = activityHistory(event.activity, "running");
+      if (startedHistory) next.history = recordHistory(state, startedHistory, historyLimit);
       break;
     }
     case "activity.completed": {
@@ -259,8 +359,20 @@ export function reduceEvent(
         ...(previous.currentActivityId === event.activityId ? { currentActivityId: undefined } : {}),
         updatedAt: event.at,
       };
+      if (completed) {
+        const status = completed.outcome === "failed" || completed.outcome === "declined"
+          ? "failed"
+          : completed.outcome === "interrupted"
+            ? "interrupted"
+            : "completed";
+        const completedHistory = activityHistory(completed, status);
+        if (completedHistory) next.history = recordHistory(state, completedHistory, historyLimit);
+      }
       break;
     }
+    case "history.recorded":
+      next.history = recordHistory(state, resolveHistoryRecipients(state, event.history), historyLimit);
+      break;
     case "request.opened": {
       next.pendingRequests[event.request.id] = event.request;
       const previous = ensureAgent(state, event.request.agentId, event.at);
@@ -271,6 +383,18 @@ export function reduceEvent(
         waitingReasons: reasons,
         updatedAt: event.at,
       };
+      next.history = recordHistory(state, {
+        id: `request:${event.request.id}`,
+        kind: "request",
+        actor: agentActor(event.request.agentId),
+        recipients: [{ type: "human" }],
+        summary: event.request.title,
+        ...(event.request.detail ? { content: event.request.detail } : {}),
+        status: "running",
+        correlationId: event.request.id,
+        occurredAt: event.request.openedAt,
+        source: "derived",
+      }, historyLimit);
       break;
     }
     case "request.resolved": {
@@ -286,6 +410,20 @@ export function reduceEvent(
           waitingReasons: remaining,
           updatedAt: event.at,
         };
+      }
+      if (request) {
+        next.history = recordHistory(state, {
+          id: `request:${event.requestId}`,
+          kind: "request",
+          actor: agentActor(request.agentId),
+          recipients: [{ type: "human" }],
+          summary: request.title,
+          ...(request.detail ? { content: request.detail } : {}),
+          status: "completed",
+          correlationId: request.id,
+          occurredAt: request.openedAt,
+          source: "derived",
+        }, historyLimit);
       }
       break;
     }

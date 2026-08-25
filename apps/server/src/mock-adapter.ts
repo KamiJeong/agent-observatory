@@ -3,6 +3,7 @@ import type {
   CodexAdapter,
   CodexRuntimeEvent,
   DiscoveryOptions,
+  HistoryEvent,
   NativeThreadStatus,
   ReadThreadOptions,
   RuntimeInfo,
@@ -84,7 +85,31 @@ export class MockCodexAdapter implements CodexAdapter {
       at: Date.now(),
       connection: { phase: "connected", attempt: 0, message: `Mock scenario ${this.#scenario.toUpperCase()}` },
     });
-    if (this.#scenario === "a") this.#runScenarioA();
+    if (this.#scenario === "a") {
+      const now = Date.now();
+      this.#history({
+        id: "mock-request",
+        kind: "request",
+        actor: { type: "human" },
+        recipients: [{ type: "agent", id: "mock-main" }],
+        summary: "Request received",
+        content: "Inspect the Codex agent run and report verified results.",
+        status: "completed",
+        occurredAt: now,
+        source: "mock",
+      });
+      this.#history({
+        id: "mock-decision",
+        kind: "decision",
+        actor: { type: "agent", id: "mock-main" },
+        summary: "Plan updated",
+        content: "Research the protocol, implement the projector, then verify it in the browser.",
+        status: "completed",
+        occurredAt: now + 1,
+        source: "mock",
+      });
+      this.#runScenarioA();
+    }
     if (this.#scenario === "b") this.#runScenarioB();
     if (this.#scenario === "stress") this.#runStress();
   }
@@ -161,9 +186,24 @@ export class MockCodexAdapter implements CodexAdapter {
     });
   }
 
+  #history(history: HistoryEvent): void {
+    this.#emit({ type: "history.recorded", at: history.occurredAt, history });
+  }
+
   #runScenarioA(): void {
     this.#schedule(500, () => {
       this.#discover(baseThread("mock-researcher", "Researcher", "research", active(), "mock-main", 1));
+      this.#history({
+        id: "mock-research-handoff",
+        kind: "handoff",
+        actor: { type: "agent", id: "mock-main" },
+        recipients: [{ type: "agent", id: "mock-researcher" }],
+        summary: "Delegated work",
+        content: "Identify the protocol events needed for agent status projection.",
+        status: "sent",
+        occurredAt: Date.now(),
+        source: "mock",
+      });
       this.#activity("mock-researcher", "research-web", "tool", "Searching Codex protocol", "thread/status/changed");
     });
     this.#schedule(1_100, () => {
@@ -178,6 +218,17 @@ export class MockCodexAdapter implements CodexAdapter {
         threadId: "mock-researcher",
         activityId: "research-web",
         outcome: "completed",
+      });
+      this.#history({
+        id: "mock-research-delivery",
+        kind: "delivery",
+        actor: { type: "agent", id: "mock-researcher" },
+        recipients: [{ type: "agent", id: "mock-main" }],
+        summary: "Reported result",
+        content: "Confirmed thread/status/changed as the primary native status signal.",
+        status: "completed",
+        occurredAt: Date.now(),
+        source: "mock",
       });
     });
     this.#schedule(3_800, () => {
@@ -205,6 +256,17 @@ export class MockCodexAdapter implements CodexAdapter {
     this.#schedule(10_500, () => {
       this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-tester", status: "completed" });
       this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-implementer", status: "completed" });
+      this.#history({
+        id: "mock-final-delivery",
+        kind: "delivery",
+        actor: { type: "agent", id: "mock-main" },
+        recipients: [{ type: "human" }],
+        summary: "Delivered final result",
+        content: "Implementation and browser verification completed.",
+        status: "completed",
+        occurredAt: Date.now(),
+        source: "mock",
+      });
     });
   }
 
