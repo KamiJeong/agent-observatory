@@ -47,13 +47,26 @@ class UiStore {
     if (this.#retryTimer) clearTimeout(this.#retryTimer);
     this.#socket?.close();
     this.#socket = undefined;
-    void fetch("/api/retry", { method: "POST", headers: this.#authHeaders() }).catch(() => undefined);
+    void fetch("/api/retry", { method: "POST" }).catch(() => undefined);
     this.#openSocket();
   }
 
   async #loadInitial(): Promise<void> {
     try {
-      const response = await fetch("/api/snapshot", { headers: this.#authHeaders() });
+      const response = await fetch("/api/snapshot");
+      if (response.status === 401) {
+        this.#stopped = true;
+        this.#socket?.close();
+        this.#set({
+          ...this.#snapshot,
+          connection: {
+            phase: "disconnected",
+            attempt: 0,
+            message: "Authentication required. Reopen the dashboard from the current Observatory server URL.",
+          },
+        });
+        return;
+      }
       if (!response.ok) return;
       this.#set((await response.json()) as ObservatorySnapshot);
     } catch {
@@ -65,8 +78,6 @@ class UiStore {
     if (this.#stopped || this.#socket) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socketUrl = new URL(`${protocol}//${window.location.host}/ws`);
-    const token = this.#accessToken();
-    if (token) socketUrl.searchParams.set("token", token);
     const socket = new WebSocket(socketUrl);
     this.#socket = socket;
     socket.addEventListener("open", () => {
@@ -113,22 +124,6 @@ class UiStore {
     for (const listener of this.#listeners) listener();
   }
 
-  #accessToken(): string | null {
-    const url = new URL(window.location.href);
-    const urlToken = url.searchParams.get("token");
-    if (urlToken) {
-      window.sessionStorage.setItem("observatory.accessToken", urlToken);
-      url.searchParams.delete("token");
-      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
-      return urlToken;
-    }
-    return window.sessionStorage.getItem("observatory.accessToken");
-  }
-
-  #authHeaders(): HeadersInit {
-    const token = this.#accessToken();
-    return token ? { authorization: `Bearer ${token}` } : {};
-  }
 }
 
 export const uiStore = new UiStore();

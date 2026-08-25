@@ -24,8 +24,8 @@ const devWebOrigins = runningFromSource
 const { server, connectAdapter } = createObservatoryHttpServer({ accessToken, adapter, webDist, devWebOrigins });
 
 server.listen(port, "127.0.0.1", () => {
-  const dashboardOrigin = devWebOrigins?.[0] ?? `http://127.0.0.1:${port}`;
-  console.log(`Codex Agent Observatory server: ${dashboardOrigin}/?token=${encodeURIComponent(accessToken)}`);
+  const bootstrapOrigin = `http://127.0.0.1:${port}`;
+  console.log(`Codex Agent Observatory server: ${bootstrapOrigin}/?token=${encodeURIComponent(accessToken)}`);
   console.log(`Adapter: ${adapter.mode}`);
 });
 

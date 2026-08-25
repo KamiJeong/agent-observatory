@@ -977,6 +977,7 @@ var ObservatoryStore = class {
 import { WebSocketServer, WebSocket } from "ws";
 var MAX_WEBSOCKET_PAYLOAD_BYTES = 8 * 1024;
 var DEFAULT_RETRY_WINDOW_MS = 1e3;
+var OBSERVATORY_SESSION_COOKIE = "observatory_session";
 var securityHeaders = {
   "cache-control": "no-store",
   "content-security-policy": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'",
@@ -1018,9 +1019,22 @@ function tokenMatches(provided, expected) {
   const expectedBuffer = Buffer.from(expected);
   return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
-function bearerToken(request) {
-  const authorization = request.headers.authorization;
-  return authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : void 0;
+function sessionToken(request) {
+  const cookie = request.headers.cookie;
+  if (!cookie) return void 0;
+  for (const part of cookie.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== OBSERVATORY_SESSION_COOKIE) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return void 0;
+    }
+  }
+  return void 0;
+}
+function sessionCookie(accessToken2) {
+  return `${OBSERVATORY_SESSION_COOKIE}=${encodeURIComponent(accessToken2)}; HttpOnly; SameSite=Strict; Path=/`;
 }
 function publicSnapshot(snapshot) {
   return { ...snapshot, debug: snapshot.debug.map(({ payload: _payload, ...entry }) => entry) };
@@ -1095,21 +1109,34 @@ function createObservatoryHttpServer(options) {
       return;
     }
     const requestUrl = new URL(request.url ?? "/", authority);
+    if (requestUrl.pathname === "/" && requestUrl.searchParams.has("token")) {
+      if (!tokenMatches(requestUrl.searchParams.get("token") ?? void 0, accessToken2)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatoryBootstrap" });
+        return;
+      }
+      response.writeHead(302, {
+        ...securityHeaders,
+        location: devWebOrigins2?.[0] ?? "/",
+        "set-cookie": sessionCookie(accessToken2)
+      });
+      response.end();
+      return;
+    }
     if (requestUrl.pathname === "/api/health") {
       sendJson(response, 200, { ok: true, connection: store.snapshot().connection });
       return;
     }
     if (requestUrl.pathname === "/api/snapshot") {
-      if (!tokenMatches(bearerToken(request), accessToken2)) {
-        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" });
+      if (!tokenMatches(sessionToken(request), accessToken2)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
         return;
       }
       sendJson(response, 200, publicSnapshot(store.snapshot()));
       return;
     }
     if (requestUrl.pathname === "/api/retry" && request.method === "POST") {
-      if (!tokenMatches(bearerToken(request), accessToken2)) {
-        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" });
+      if (!tokenMatches(sessionToken(request), accessToken2)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
         return;
       }
       if (!retryAllowed()) {
@@ -1124,8 +1151,8 @@ function createObservatoryHttpServer(options) {
       sendJson(response, 404, { error: "Not found" });
       return;
     }
-    if (requestUrl.pathname === "/" && devWebOrigins2?.[0]) {
-      response.writeHead(302, { ...securityHeaders, location: `${devWebOrigins2[0]}/?token=${encodeURIComponent(accessToken2)}` });
+    if (requestUrl.pathname === "/" && devWebOrigins2?.[0] && tokenMatches(sessionToken(request), accessToken2)) {
+      response.writeHead(302, { ...securityHeaders, location: devWebOrigins2[0] });
       response.end();
       return;
     }
@@ -1155,7 +1182,7 @@ function createObservatoryHttpServer(options) {
       rejectUpgrade(socket, 404);
       return;
     }
-    if (!tokenMatches(requestUrl.searchParams.get("token") ?? void 0, accessToken2)) {
+    if (!tokenMatches(sessionToken(request), accessToken2)) {
       rejectUpgrade(socket, 401);
       return;
     }
@@ -2256,8 +2283,8 @@ var webPort = Number(process.env.OBSERVATORY_WEB_PORT ?? 4318);
 var devWebOrigins = runningFromSource ? [`http://127.0.0.1:${webPort}`, `http://localhost:${webPort}`] : void 0;
 var { server, connectAdapter } = createObservatoryHttpServer({ accessToken, adapter, webDist, devWebOrigins });
 server.listen(port, "127.0.0.1", () => {
-  const dashboardOrigin = devWebOrigins?.[0] ?? `http://127.0.0.1:${port}`;
-  console.log(`Codex Agent Observatory server: ${dashboardOrigin}/?token=${encodeURIComponent(accessToken)}`);
+  const bootstrapOrigin = `http://127.0.0.1:${port}`;
+  console.log(`Codex Agent Observatory server: ${bootstrapOrigin}/?token=${encodeURIComponent(accessToken)}`);
   console.log(`Adapter: ${adapter.mode}`);
 });
 void connectAdapter().catch(() => void 0);

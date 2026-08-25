@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from "ws";
 
 const MAX_WEBSOCKET_PAYLOAD_BYTES = 8 * 1024;
 const DEFAULT_RETRY_WINDOW_MS = 1_000;
+export const OBSERVATORY_SESSION_COOKIE = "observatory_session";
 
 const securityHeaders = {
   "cache-control": "no-store",
@@ -79,9 +80,23 @@ function tokenMatches(provided: string | undefined, expected: string): boolean {
   return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-function bearerToken(request: IncomingMessage): string | undefined {
-  const authorization = request.headers.authorization;
-  return authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
+function sessionToken(request: IncomingMessage): string | undefined {
+  const cookie = request.headers.cookie;
+  if (!cookie) return undefined;
+  for (const part of cookie.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== OBSERVATORY_SESSION_COOKIE) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function sessionCookie(accessToken: string): string {
+  return `${OBSERVATORY_SESSION_COOKIE}=${encodeURIComponent(accessToken)}; HttpOnly; SameSite=Strict; Path=/`;
 }
 
 function publicSnapshot(snapshot: ObservatorySnapshot): ObservatorySnapshot {
@@ -162,21 +177,34 @@ export function createObservatoryHttpServer(options: ObservatoryHttpServerOption
       return;
     }
     const requestUrl = new URL(request.url ?? "/", authority);
+    if (requestUrl.pathname === "/" && requestUrl.searchParams.has("token")) {
+      if (!tokenMatches(requestUrl.searchParams.get("token") ?? undefined, accessToken)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatoryBootstrap" });
+        return;
+      }
+      response.writeHead(302, {
+        ...securityHeaders,
+        location: devWebOrigins?.[0] ?? "/",
+        "set-cookie": sessionCookie(accessToken),
+      });
+      response.end();
+      return;
+    }
     if (requestUrl.pathname === "/api/health") {
       sendJson(response, 200, { ok: true, connection: store.snapshot().connection });
       return;
     }
     if (requestUrl.pathname === "/api/snapshot") {
-      if (!tokenMatches(bearerToken(request), accessToken)) {
-        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" });
+      if (!tokenMatches(sessionToken(request), accessToken)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
         return;
       }
       sendJson(response, 200, publicSnapshot(store.snapshot()));
       return;
     }
     if (requestUrl.pathname === "/api/retry" && request.method === "POST") {
-      if (!tokenMatches(bearerToken(request), accessToken)) {
-        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" });
+      if (!tokenMatches(sessionToken(request), accessToken)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
         return;
       }
       if (!retryAllowed()) {
@@ -193,8 +221,8 @@ export function createObservatoryHttpServer(options: ObservatoryHttpServerOption
       return;
     }
 
-    if (requestUrl.pathname === "/" && devWebOrigins?.[0]) {
-      response.writeHead(302, { ...securityHeaders, location: `${devWebOrigins[0]}/?token=${encodeURIComponent(accessToken)}` });
+    if (requestUrl.pathname === "/" && devWebOrigins?.[0] && tokenMatches(sessionToken(request), accessToken)) {
+      response.writeHead(302, { ...securityHeaders, location: devWebOrigins[0] });
       response.end();
       return;
     }
@@ -225,7 +253,7 @@ export function createObservatoryHttpServer(options: ObservatoryHttpServerOption
       rejectUpgrade(socket, 404);
       return;
     }
-    if (!tokenMatches(requestUrl.searchParams.get("token") ?? undefined, accessToken)) {
+    if (!tokenMatches(sessionToken(request), accessToken)) {
       rejectUpgrade(socket, 401);
       return;
     }

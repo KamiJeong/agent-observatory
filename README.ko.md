@@ -67,7 +67,9 @@ bun install
 bun run dev
 ```
 
-브라우저에서 <http://127.0.0.1:4318>을 엽니다.
+백엔드가 출력하는 `Codex Agent Observatory server` bootstrap URL을 여세요.
+서버가 HttpOnly 로컬 세션 쿠키를 설정한 뒤 인증정보가 남지 않은
+<http://127.0.0.1:4318>로 리다이렉트합니다.
 
 #### 2. 현재 실행 중인 Codex 관측
 
@@ -79,8 +81,10 @@ codex --version
 bun run dev:real
 ```
 
-브라우저에서 <http://127.0.0.1:4318>을 엽니다. 기본 공유 호환 전송 방식은 현재
-머신에서 관측 가능한 활성 Codex 작업 디렉터리를 함께 탐색합니다.
+개발 실행기는 가능한 경우 인증된 대시보드를 자동으로 엽니다. 자동 실행되지 않으면
+출력된 `Dashboard bootstrap` URL을 여세요. 기본 공유 호환 전송 방식은 현재 머신에서
+관측 가능한 활성 Codex 작업 디렉터리를 함께 탐색합니다. 브라우저 자동 실행을
+끄려면 `--no-open`을 사용하세요.
 
 특정 프로젝트만 보고 싶다면 정확한 작업 디렉터리를 지정합니다. 개발용 실행기는
 Linux, macOS, PowerShell, 명령 프롬프트에서 같은 옵션을 사용할 수 있습니다.
@@ -206,7 +210,7 @@ Mock Mode에는 Codex CLI가 필요하지 않습니다.
 
 ```bash
 bun run dev          # 서버 :4317 + Vite :4318, Mock 시나리오 A
-bun run dev:real     # 크로스플랫폼 Real Mode 실행기
+bun run dev:real     # 인증된 로컬 세션을 여는 Real Mode 실행기
 bun run typecheck
 bun run test
 bun run test:e2e
@@ -222,7 +226,9 @@ CI 및 npm 릴리스 절차는 [`CONTRIBUTING.md`](CONTRIBUTING.md)를 참고하
 bun run --filter @observatory/server start
 ```
 
-그런 다음 <http://127.0.0.1:4317>을 엽니다.
+그런 다음 서버가 출력한 token 포함 로컬 bootstrap URL을 여세요. token은 HttpOnly,
+SameSite 세션 쿠키를 설정할 때 한 번만 사용되고 리다이렉트 후 브라우저 URL에서
+제거됩니다.
 
 ## Mock Mode
 
@@ -394,6 +400,11 @@ curl http://127.0.0.1:4317/api/health
 브라우저는 지수 백오프로 로컬 WebSocket 연결을 재시도합니다. Real 어댑터는 App
 Server 프로세스 종료를 별도로 재시도합니다. 연결과 프로토콜 요약은 Debug 패널에서
 확인할 수 있으며, 원시 스택 트레이스는 기본 UI에 노출되지 않습니다.
+
+대시보드에 인증이 필요하다는 메시지가 표시되면 Vite 포트를 직접 열지 마세요.
+Observatory를 다시 시작하고 가장 최근에 출력된 `Codex Agent Observatory server`
+또는 `Dashboard bootstrap` URL을 사용하세요. 이전 서버 프로세스의 세션은 재시작 후
+의도적으로 무효화됩니다.
 
 ### Real Mode에 UNKNOWN이 표시됨
 
