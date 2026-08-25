@@ -523,24 +523,38 @@ code {
   stroke-width: 1.25;
   vector-effect: non-scaling-stroke;
 }
-.graph__edges path[data-active] { stroke: #7f8b93; stroke-width: 2; }
+.graph__edges path[data-active] {
+  opacity: .95;
+  stroke: var(--edge-active-color, #9aa7ae);
+  stroke-width: 2.5;
+}
 .agent-node {
   background: #161a1d;
   border: 1px solid var(--line-strong);
   border-left: 3px solid var(--agent-role-color, var(--line-strong));
   border-top: 2px solid var(--idle);
   box-shadow: 0 5px 16px rgb(0 0 0 / 22%);
-  height: 124px;
+  height: 168px;
   left: 0;
   padding: 9px 11px;
   position: absolute;
   text-align: left;
   top: 0;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
   width: 240px;
 }
 .agent-node:hover { background: #1b2023; border-right-color: #59636a; border-bottom-color: #59636a; }
-.agent-node[data-selected] { background: #1d2225; box-shadow: 0 0 0 1px #7b858d, 0 8px 20px rgb(0 0 0 / 35%); }
+.agent-node[data-selected] {
+  background: #20272b;
+  border-bottom-color: var(--agent-role-color, #b7c1c7);
+  border-right-color: var(--agent-role-color, #b7c1c7);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--agent-role-color, #b7c1c7) 82%, white),
+    0 0 0 5px color-mix(in srgb, var(--agent-role-color, #b7c1c7) 24%, transparent),
+    0 10px 24px rgb(0 0 0 / 46%);
+  z-index: 2;
+}
+.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offset: 6px; z-index: 3; }
 .agent-node--parent::after {
   background: #5e6970;
   bottom: -8px;
@@ -567,6 +581,7 @@ code {
   padding: 3px 5px;
 }
 .agent-node--working {
+  --agent-state-color: var(--working);
   background: #141c18;
   border-bottom-color: rgb(68 194 122 / 45%);
   border-right-color: rgb(68 194 122 / 45%);
@@ -574,13 +589,14 @@ code {
   box-shadow: inset 0 0 0 1px rgb(68 194 122 / 16%), 0 5px 16px rgb(0 0 0 / 22%);
 }
 .agent-node--working:hover { background: #18231d; border-bottom-color: var(--working); border-right-color: var(--working); }
-.agent-node--working[data-selected] { background: #1b2720; box-shadow: 0 0 0 1px #8fa99a, 0 8px 20px rgb(0 0 0 / 35%); }
+.agent-node--working[data-selected] { background: #1b2720; }
 .agent-node--working .status { background: rgb(68 194 122 / 12%); box-shadow: 0 0 0 1px rgb(68 194 122 / 14%); }
 .agent-node--working .status__icon { animation: working-status-pulse 1.8s ease-in-out infinite; }
-.agent-node--waiting { border-top-color: var(--waiting); }
-.agent-node--completed { border-top-color: var(--completed); }
-.agent-node--failed { border-top-color: var(--failed); }
-.agent-node--unknown { border-top-color: var(--unknown); }
+.agent-node--waiting { --agent-state-color: var(--waiting); border-top-color: var(--waiting); }
+.agent-node--idle { --agent-state-color: var(--idle); }
+.agent-node--completed { --agent-state-color: var(--completed); border-top-color: var(--completed); }
+.agent-node--failed { --agent-state-color: var(--failed); border-top-color: var(--failed); }
+.agent-node--unknown { --agent-state-color: var(--unknown); border-top-color: var(--unknown); }
 .agent-node__topline { align-items: center; display: flex; justify-content: space-between; }
 .agent-node__signals { align-items: center; color: #8fa8b6; display: inline-flex; font-family: ui-monospace, monospace; font-size: var(--font-caption); gap: 5px; }
 .agent-node__children {
@@ -594,9 +610,41 @@ code {
 }
 .agent-node__role { color: var(--agent-role-color, var(--text-muted)); font-size: var(--font-caption); font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
 .agent-node__depth { color: var(--text-muted); font-family: ui-monospace, monospace; font-size: var(--font-caption); }
-.agent-node > strong { display: block; font-size: var(--font-emphasis); margin: 5px 0 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-node__runtime { color: #bdc7cc; display: block; font-family: "SFMono-Regular", Consolas, monospace; font-size: var(--font-caption); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-node__activity { color: var(--text-muted); display: block; font-size: var(--font-meta); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-node > strong { display: block; font-size: var(--font-emphasis); margin: 5px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-node__runtime { color: #bdc7cc; display: block; font-family: "SFMono-Regular", Consolas, monospace; font-size: var(--font-caption); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-node__activity {
+  background: #121619;
+  border-top: 1px solid #30383d;
+  bottom: 0;
+  color: #939da3;
+  display: block;
+  font-size: var(--font-meta);
+  height: 32px;
+  left: 0;
+  line-height: 31px;
+  overflow: hidden;
+  padding: 0 11px;
+  position: absolute;
+  right: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-node__activity[data-current] {
+  background: color-mix(in srgb, var(--agent-state-color, var(--completed)) 10%, #121619);
+  color: color-mix(in srgb, var(--agent-state-color, var(--completed)) 72%, var(--text));
+  padding-left: 27px;
+}
+.agent-node__activity[data-current]::before {
+  background: var(--agent-state-color, var(--completed));
+  border-radius: 50%;
+  content: "";
+  height: 7px;
+  left: 12px;
+  position: absolute;
+  top: 12px;
+  width: 7px;
+}
+.agent-node--working .agent-node__activity[data-current]::before { animation: working-status-pulse 1.8s ease-in-out infinite; }
 .role-tooltip {
   background: #0d1113;
   border: 1px solid var(--line-strong);
@@ -622,7 +670,8 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-node--working .status__icon { animation: none; }
+  .agent-node--working .status__icon,
+  .agent-node--working .agent-node__activity[data-current]::before { animation: none; }
 }
 .graph__empty { color: var(--text-soft); display: flex; flex-direction: column; font-size: var(--font-body); inset: 0; justify-content: center; pointer-events: none; position: absolute; text-align: center; }
 .graph__empty small { color: var(--text-muted); margin-top: 6px; }

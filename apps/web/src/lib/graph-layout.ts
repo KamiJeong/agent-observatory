@@ -3,7 +3,7 @@ import type { ObservatorySnapshot } from "@observatory/core";
 export interface Point { x: number; y: number }
 
 export const GRAPH_NODE_WIDTH = 240;
-export const GRAPH_NODE_HEIGHT = 124;
+export const GRAPH_NODE_HEIGHT = 168;
 
 interface LayoutBox {
   width: number;
