@@ -42,7 +42,7 @@ data. Reproduce it with `bunx agent-observatory --scenario demo`.
 
 ## Quick Start
 
-### Run directly with bunx
+### Run directly with bunx or npx
 
 Run without installing the npm package separately. The default is Real Mode
 with both Codex and Claude selected across all active workspaces, and it opens
@@ -50,7 +50,12 @@ a browser automatically.
 
 ```bash
 bunx agent-observatory
+npx agent-observatory
 ```
+
+Real Mode includes bounded Human request and agent response text by default for
+both launchers. Use `--no-capture-content` to keep the dashboard in
+metadata-only mode.
 
 Limit Real Mode to one provider when needed. The explicit `--real` flag remains
 available for compatibility, but is no longer required.
@@ -350,7 +355,7 @@ Environment options:
 | `OBSERVATORY_ROOT_THREAD_ID` | unset | Include one root plus its descendants |
 | `OBSERVATORY_CODEX_TRANSPORT` | `shared` | `shared`, `standalone`, or experimental `proxy` |
 | `OBSERVATORY_SCENARIO` | `a` | Mock fixture: `a`, `b`, `demo`, or `stress` |
-| `OBSERVATORY_CAPTURE_CONTENT` | `1` in `dev:real`; unset in the server | Expose bounded provider content in the local browser; set to `0` for metadata-only mode |
+| `OBSERVATORY_CAPTURE_CONTENT` | `1` in the public CLI and `dev:real`; unset in the server | Expose bounded provider content in the local browser; set to `0` for metadata-only mode |
 
 Example:
 

@@ -4,6 +4,8 @@ export interface RuntimeValues {
   scenario?: string;
   provider?: string;
   cwd?: string;
+  "capture-content"?: boolean;
+  "no-capture-content"?: boolean;
 }
 
 export interface RuntimeConfiguration {
@@ -18,6 +20,11 @@ export interface BrowserCommand {
 }
 
 export function resolveRuntimeConfiguration(values: RuntimeValues): RuntimeConfiguration;
+export function resolveContentCaptureSetting(
+  values: RuntimeValues,
+  environment: NodeJS.ProcessEnv,
+  adapter: RuntimeConfiguration["adapter"],
+): string | undefined;
 export function browserCommand(
   platform: NodeJS.Platform,
   environment: NodeJS.ProcessEnv,
