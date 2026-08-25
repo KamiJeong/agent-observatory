@@ -41,6 +41,7 @@
   "scripts": {
     "dev": "concurrently -n server,web -c yellow,cyan \"bun run --filter @observatory/server dev\" \"bun run --filter @observatory/web dev\"",
     "dev:real": "node scripts/run-dev-real.mjs",
+    "demo:capture": "bun run build:cli && node scripts/capture-demo.mjs",
     "build": "bun run typecheck && bun run --filter @observatory/web build",
     "build:server": "esbuild apps/server/src/index.ts --bundle --platform=node --format=esm --external:ws --outfile=apps/server/dist/index.js",
     "build:cli": "bun run build && bun run build:server",

@@ -29,14 +29,24 @@ are working in parallel:
 
 ## Demo
 
-![Codex Agent Observatory showing multiple agents running concurrently](docs/assets/agent-observatory-demo.gif)
+![Agent Observatory showing Codex and Claude agents in one dashboard](docs/assets/agent-observatory-demo.png)
+
+<details>
+<summary>Watch the provider filter, relationship view, Inspector, and Workflow Board</summary>
+
+![Agent Observatory multi-provider interaction demo](docs/assets/agent-observatory-demo.gif)
+
+</details>
+
+The demo uses a deterministic, content-safe fixture rather than local session
+data. Reproduce it with `bunx agent-observatory --scenario demo`.
 
 ## Quick Start
 
 ### Run directly with bunx
 
 Run without installing the npm package separately. The default is Mock Mode,
-which works without Codex and opens a browser automatically.
+which works without either provider CLI and opens a browser automatically.
 
 ```bash
 bunx agent-observatory
@@ -119,7 +129,8 @@ bun run dev:real -- --cwd /absolute/path/to/project
 ## Dashboard layout
 
 - **Agents**: Parent/child tree, status, role, model/effort, and skill/workflow evidence
-- **Agent Graph**: Root and subagent topology, pan/zoom/fit, and node selection
+- **Provider Health & Filters**: Independent Codex/Claude health plus provider, workspace, session, status, and search filters
+- **Agent Graph**: Spawn topology plus task, handoff, and message relationships with evidence
 - **Workflow Board**: Agent lanes grouped by observed workflow, sortable by Started/Status/Updated
 - **Run History**: Human-readable request, decision, handoff, delivery, and completion story with agent lanes
 - **Trace**: Virtualized low-level timeline with tool, command, file, test, and error filters
@@ -172,26 +183,31 @@ dependency direction, and extension points used by the server and dashboard.
 The [accessibility verification guide](docs/accessibility.md) records measured
 contrast, automated coverage, and the manual release checklist.
 
-Raw Codex JSON is never consumed by React components. Known envelopes are
-tolerantly normalized; additive fields are allowed, malformed events go to a
-bounded debug buffer, and unknown methods do not crash the dashboard.
+Raw provider records are never consumed by React components. Known envelopes
+are tolerantly normalized; additive fields are allowed, malformed events go to
+a bounded debug buffer, and unknown methods do not crash the dashboard.
 
 ## Features
 
 - Collapsible parent/child agent list with native-evidence-based status
+- Codex and Claude agents in one failure-isolated composite runtime
+- Provider health plus provider/session/workspace/status/search filters
+- Actionable setup, empty, permission, unsupported-version, and partial-failure states
 - Root/subagent tree with semantic HTML nodes and SVG connectors
+- Spawn, task, handoff, and message relationships with evidence provenance
 - Graph pan, zoom, fit, keyboard selection, and active selection highlight
 - Agent list, graph nodes, and Inspector expose observed model and reasoning effort
 - Observed skill/workflow context with Agent filters and per-node markers
 - Evidence-based Workflow Board with observed-order/status/update sorting
-- Human/agent run history with explicit sender, recipients, message content, and completion state
+- Human/agent run history with explicit sender, recipients, and completion state; bounded content appears only for fixtures or explicit opt-in capture
 - Story, Messages, and low-level Trace views with Git-style agent lanes
 - Inspector with virtualized recent activity, thread, cwd, and optional token usage
 - Virtualized activity timeline with filters and a 300-event memory bound
 - Explicit approval and user-input waiting reasons
+- Claude Agent Teams beta roles, task coordination, peer messages, and shutdown evidence
 - Connection state and exponential reconnect with jitter
 - Optional bounded protocol debug panel
-- Mock scenarios A, B, and 35-agent stress mode
+- Mock scenarios A, B, demo, and 35-agent stress mode
 - Responsive reflow: agent list → graph → activity
 
 Status is not guessed:
@@ -209,11 +225,13 @@ In particular, `notLoaded` and `thread/closed` never imply completion.
 
 ## Platform support
 
-| Platform | Real Mode discovery | Status |
-| --- | --- | --- |
-| Linux / WSL2 | Reads interactive process cwd values from `/proc` | Supported; locally verified on WSL2 Linux |
-| macOS | Finds Codex processes with `ps` and resolves cwd values with `lsof` | Implemented; native-device verification pending |
-| Windows | Finds Codex processes through PowerShell CIM; uses `-C`/`--cd` when present and otherwise selects the newest matching root from Codex state | Implemented; native-device verification pending |
+| Provider | Platform | Real Mode discovery | Status |
+| --- | --- | --- | --- |
+| Codex | Linux / WSL2 | Reads interactive process cwd values from `/proc` | Supported; locally verified on WSL2 Linux |
+| Codex | macOS | Finds processes with `ps` and resolves cwd values with `lsof` | Implemented; native-device verification pending |
+| Codex | Windows | Uses PowerShell CIM; honors `-C`/`--cd`, otherwise selects recent Codex state | Implemented; native-device verification pending |
+| Claude | Linux / WSL2 | Uses procfs cwd discovery plus bounded transcript and Agent Teams compatibility evidence | Supported; locally verified on WSL2 Linux |
+| Claude | macOS / Windows | Uses transcript-only historical discovery without exact live process mapping | Compatibility fallback; native-device verification pending |
 
 Codex and Observatory must run in the same OS environment and use the same
 `CODEX_HOME`. For example, a native Windows Observatory cannot discover Codex
@@ -252,6 +270,7 @@ bun run typecheck
 bun run test
 bun run test:e2e
 bun run build
+bun run demo:capture # regenerate the content-safe README PNG/GIF; requires ffmpeg
 ```
 
 Contributions use short-lived branches and pull requests into `main`. See
@@ -283,11 +302,13 @@ Run another fixture with:
 
 ```bash
 OBSERVATORY_SCENARIO=b bun run dev
+OBSERVATORY_SCENARIO=demo bun run dev
 OBSERVATORY_SCENARIO=stress bun run dev
 ```
 
 - `a`: spawn, activity, completion, approval waiting, recovery
 - `b`: nested frontend/test agent, completed backend, failed reviewer
+- `demo`: deterministic Codex + Claude provider, relationship, filter, and workflow showcase
 - `stress`: 35 agents with continuous deterministic status/activity updates
 
 ## Real Codex Mode
@@ -316,7 +337,7 @@ Environment options:
 | `OBSERVATORY_CWD` | `all` in shared mode | Exact cwd filter; use `all` to disable |
 | `OBSERVATORY_ROOT_THREAD_ID` | unset | Include one root plus its descendants |
 | `OBSERVATORY_CODEX_TRANSPORT` | `shared` | `shared`, `standalone`, or experimental `proxy` |
-| `OBSERVATORY_SCENARIO` | `a` | Mock fixture: `a`, `b`, or `stress` |
+| `OBSERVATORY_SCENARIO` | `a` | Mock fixture: `a`, `b`, `demo`, or `stress` |
 | `OBSERVATORY_CAPTURE_CONTENT` | unset | Set to `1` to expose bounded provider content in the local browser; metadata-only by default |
 
 Example:
@@ -325,15 +346,6 @@ Example:
 bun run dev:real -- --root-thread 019f...
 bun run dev:real -- --provider codex,claude
 ```
-
-## Real Claude Code Mode
-
-Claude observation is a version-aware compatibility adapter. It discovers
-active Claude Code working directories and tails bounded root/subagent
-transcripts without retaining prompt, response, thinking, command, path, or
-tool-input contents. Official hooks and OpenTelemetry remain planned accuracy
-enhancements. See [Claude compatibility](docs/claude-compatibility.md) for the
-evidence and version boundary.
 
 ### Real-time observation boundary
 
@@ -380,6 +392,17 @@ At runtime the debug panel records:
 Other Codex versions may work because parsing is additive-field tolerant, but
 they are not claimed as supported until bindings are regenerated and tests pass.
 
+## Real Claude Code Mode
+
+Claude observation is a version-aware, read-only compatibility adapter. It
+discovers active working directories on Linux and reads bounded root/subagent
+transcript tails plus Agent Teams beta config, task, and mailbox metadata. It
+does not retain prompts, responses, thinking, commands, tool input, task text,
+or mailbox content. Other platforms currently use transcript-only historical
+discovery. Official hooks and OpenTelemetry remain planned accuracy
+enhancements. See [Claude compatibility](docs/claude-compatibility.md) for the
+evidence, privacy, and version boundaries.
+
 ## Protocol generation
 
 After changing the installed Codex version:
@@ -414,7 +437,7 @@ events.
 ## Testing
 
 ```bash
-bun run test         # 40 unit, integration, CLI, and UI tests
+bun run test         # unit, integration, CLI, and UI test suite
 bun run test:e2e     # Chromium mock lifecycle
 bun run build        # typecheck + production frontend build
 ```
@@ -457,8 +480,8 @@ connection and protocol summaries; raw stack traces are not exposed in the
 main UI.
 
 If the dashboard reports that authentication is required, do not open the Vite
-port directly. Restart Observatory and use the newest `Codex Agent Observatory
-server` or `Dashboard bootstrap` URL. Sessions from an earlier server process
+port directly. Restart Observatory and use the newest `Agent Observatory server`
+or `Dashboard bootstrap` URL. Sessions from an earlier server process
 are intentionally invalid after restart.
 
 ### Real Mode shows UNKNOWN

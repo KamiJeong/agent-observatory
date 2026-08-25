@@ -36,6 +36,7 @@ describe("agent-observatory CLI", () => {
     expect(help.status).toBe(0);
     expect(help.stdout).toContain("--provider <name>");
     expect(help.stdout).toContain("--real --provider all");
+    expect(help.stdout).toContain("--scenario demo");
 
     const invalid = spawnSync(process.execPath, [cliPath, "--real", "--provider", "unknown"], {
       cwd: repositoryRoot,

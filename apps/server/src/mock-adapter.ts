@@ -7,10 +7,11 @@ import type {
   NativeThreadStatus,
   ReadThreadOptions,
   RuntimeInfo,
+  RuntimeProvider,
   ThreadSnapshot,
 } from "@observatory/core";
 
-type Scenario = "a" | "b" | "stress";
+type Scenario = "a" | "b" | "demo" | "stress";
 
 const active = (flags: string[] = []): NativeThreadStatus => ({ type: "active", activeFlags: flags });
 
@@ -47,6 +48,56 @@ function baseThread(
   };
 }
 
+function demoThread({
+  id,
+  sessionId,
+  nickname,
+  role,
+  provider,
+  nativeStatus,
+  parentThreadId,
+  depth = 0,
+  model,
+  modelProvider,
+  updatedOffset = 0,
+}: {
+  id: string;
+  sessionId: string;
+  nickname: string;
+  role: string;
+  provider: RuntimeProvider;
+  nativeStatus: NativeThreadStatus;
+  parentThreadId?: string;
+  depth?: number;
+  model: string;
+  modelProvider: string;
+  updatedOffset?: number;
+}): ThreadSnapshot {
+  const now = Date.now();
+  return {
+    provider,
+    id,
+    sessionId,
+    ...(parentThreadId ? { parentThreadId } : {}),
+    nickname,
+    role,
+    nativeStatus,
+    createdAt: now - Math.max(1, 8 - depth) * 38_000,
+    updatedAt: now - updatedOffset,
+    cwd: "/projects/agent-observatory-demo",
+    model,
+    modelProvider,
+    reasoningEffort: depth === 0 ? "high" : "medium",
+    observedSkills: depth === 0 ? [] : [role === "teammate" ? "privacy-review" : "release-verification"],
+    observedWorkflows: ["Multi-runtime release"],
+    collaborationMode: provider === "claude" ? "claude-agent-team-beta" : "default",
+    source: { provider, observation: "demo-fixture", contentCaptured: false },
+    evidenceSources: ["mock"],
+    depth,
+    path: parentThreadId ? `/release/${nickname.toLowerCase().replaceAll(" ", "-")}` : `/release/${provider}`,
+  };
+}
+
 export class MockCodexAdapter implements AgentRuntimeAdapter {
   readonly provider = "mock" as const;
   readonly mode = "mock" as const;
@@ -57,7 +108,11 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
   #connected = false;
 
   constructor(scenario: string = "a") {
-    this.#scenario = scenario === "b" || scenario === "stress" ? scenario : "a";
+    this.#scenario = scenario === "b" || scenario === "demo" || scenario === "stress" ? scenario : "a";
+    if (this.#scenario === "demo") {
+      this.#seedDemo();
+      return;
+    }
     const root = baseThread("mock-main", "Main", "root", active());
     this.#threads.set(root.id, root);
     if (this.#scenario === "b") this.#seedScenarioB();
@@ -113,6 +168,7 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
       this.#runScenarioA();
     }
     if (this.#scenario === "b") this.#runScenarioB();
+    if (this.#scenario === "demo") this.#runDemo();
     if (this.#scenario === "stress") this.#runStress();
   }
 
@@ -292,6 +348,112 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
     this.#schedule(1_400, () =>
       this.#activity("mock-reviewer", "review-error", "error", "Review failed", "Malformed tool response"),
     );
+  }
+
+  #seedDemo(): void {
+    const threads = [
+      demoThread({
+        provider: "codex", id: "codex:demo-orchestrator", sessionId: "codex:release-session",
+        nickname: "Release Orchestrator", role: "root", nativeStatus: active(),
+        model: "gpt-5.6-sol", modelProvider: "openai",
+      }),
+      demoThread({
+        provider: "codex", id: "codex:demo-builder", sessionId: "codex:release-session",
+        nickname: "Runtime Builder", role: "implementation", nativeStatus: active(),
+        parentThreadId: "codex:demo-orchestrator", depth: 1,
+        model: "gpt-5.6-terra", modelProvider: "openai", updatedOffset: 4_000,
+      }),
+      demoThread({
+        provider: "codex", id: "codex:demo-tester", sessionId: "codex:release-session",
+        nickname: "Browser Tester", role: "testing", nativeStatus: active(["waitingOnApproval"]),
+        parentThreadId: "codex:demo-orchestrator", depth: 1,
+        model: "gpt-5.6-terra", modelProvider: "openai", updatedOffset: 7_000,
+      }),
+      demoThread({
+        provider: "claude", id: "claude:demo-lead", sessionId: "claude:team-session",
+        nickname: "Claude Team Lead", role: "teamLead", nativeStatus: active(),
+        model: "claude-opus-4-1", modelProvider: "anthropic", updatedOffset: 1_500,
+      }),
+      demoThread({
+        provider: "claude", id: "claude:demo-reviewer", sessionId: "claude:team-session",
+        nickname: "Privacy Reviewer", role: "teammate", nativeStatus: { type: "idle" },
+        parentThreadId: "claude:demo-lead", depth: 1,
+        model: "claude-sonnet-4", modelProvider: "anthropic", updatedOffset: 5_000,
+      }),
+      demoThread({
+        provider: "claude", id: "claude:demo-researcher", sessionId: "claude:team-session",
+        nickname: "Evidence Researcher", role: "subagent", nativeStatus: { type: "idle" },
+        parentThreadId: "claude:demo-lead", depth: 1,
+        model: "claude-sonnet-4", modelProvider: "anthropic", updatedOffset: 9_000,
+      }),
+    ];
+    for (const thread of threads) this.#threads.set(thread.id, thread);
+  }
+
+  #runDemo(): void {
+    const now = Date.now();
+    this.#emit({
+      type: "provider.connection.changed",
+      provider: "codex",
+      at: now,
+      connection: { phase: "connected", attempt: 0, message: "Codex demo observation active" },
+    });
+    this.#emit({
+      type: "provider.connection.changed",
+      provider: "claude",
+      at: now,
+      connection: { phase: "connected", attempt: 0, message: "Claude demo observation active" },
+    });
+    this.#history({
+      id: "demo-request", kind: "request", actor: { type: "human" },
+      recipients: [{ type: "agent", id: "codex:demo-orchestrator" }],
+      summary: "Multi-provider release requested",
+      content: "Coordinate implementation and verification across Codex and Claude Code.",
+      status: "completed", occurredAt: now, source: "mock",
+    });
+    this.#history({
+      id: "demo-plan", kind: "decision", actor: { type: "agent", id: "codex:demo-orchestrator" },
+      summary: "Release plan confirmed",
+      content: "Build the runtime, review privacy, then complete browser verification.",
+      status: "completed", occurredAt: now + 1, source: "mock",
+    });
+    this.#history({
+      id: "demo-provider-handoff", kind: "handoff", relationKind: "handoff",
+      actor: { type: "agent", id: "codex:demo-orchestrator" },
+      recipients: [{ type: "agent", id: "claude:demo-lead" }],
+      summary: "Claude review requested", content: "Validate compatibility evidence and privacy boundaries.",
+      status: "sent", occurredAt: now + 2, source: "mock",
+    });
+    this.#history({
+      id: "demo-team-task", kind: "handoff", relationKind: "task",
+      actor: { type: "agent", id: "claude:demo-lead" },
+      recipients: [{ type: "agent", id: "claude:demo-reviewer" }],
+      summary: "Privacy review assigned", content: "Confirm metadata-only payload behavior.",
+      status: "sent", occurredAt: now + 3, source: "mock",
+    });
+    this.#history({
+      id: "demo-peer-message", kind: "handoff", relationKind: "message",
+      actor: { type: "agent", id: "claude:demo-reviewer" },
+      recipients: [{ type: "agent", id: "codex:demo-builder" }],
+      summary: "Review evidence shared", content: "Raw provider content remains outside the public payload.",
+      status: "sent", occurredAt: now + 4, source: "mock",
+    });
+    this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout");
+    this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts");
+    this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence");
+    this.#activity("claude:demo-reviewer", "demo-privacy", "test", "Checking privacy boundary", "provider content redaction");
+    this.#emit({
+      type: "request.opened", at: now + 5,
+      request: {
+        id: "demo-browser-approval", agentId: "codex:demo-tester", reason: "approval",
+        title: "Browser verification approval", detail: "Run the deterministic demo capture",
+        openedAt: now + 5, evidenceSource: "mock",
+      },
+    });
+    this.#emit({
+      type: "agent.lifecycle", at: now + 6,
+      threadId: "claude:demo-researcher", status: "completed",
+    });
   }
 
   #seedStress(): void {

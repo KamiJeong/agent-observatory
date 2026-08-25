@@ -27,14 +27,24 @@ Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 �
 
 ## 데모
 
-![여러 에이전트가 동시에 실행 중인 Codex Agent Observatory](docs/assets/agent-observatory-demo.gif)
+![Codex와 Claude 에이전트를 한 화면에 표시하는 Agent Observatory](docs/assets/agent-observatory-demo.png)
+
+<details>
+<summary>Provider 필터, 관계 보기, Inspector, Workflow Board 동작 보기</summary>
+
+![Agent Observatory multi-provider 인터랙션 데모](docs/assets/agent-observatory-demo.gif)
+
+</details>
+
+데모에는 로컬 세션 데이터 대신 결정론적이고 내용이 안전한 fixture를 사용합니다.
+`bunx agent-observatory --scenario demo`로 동일한 화면을 실행할 수 있습니다.
 
 ## 빠른 시작
 
 ### bunx로 바로 실행
 
-npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 Codex가 없어도
-동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
+npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 두 provider CLI가
+없어도 동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
 
 ```bash
 bunx agent-observatory
@@ -114,7 +124,8 @@ bun run dev:real -- --cwd /absolute/path/to/project
 ## 화면 구성
 
 - **Agents**: 부모/자식 트리, 상태, 역할, 모델/추론 강도, 스킬/워크플로 근거
-- **Agent Graph**: 루트와 서브에이전트 토폴로지, 이동/확대·축소/맞춤, 노드 선택
+- **Provider 상태 및 필터**: Codex/Claude 독립 상태와 provider, workspace, session, status, 검색 필터
+- **Agent Graph**: 생성 토폴로지와 근거가 표시된 task, handoff, message 관계
 - **Workflow Board**: 관측된 워크플로별 에이전트 레인과 Started/Status/Updated 정렬
 - **Run History**: 요청, 결정, 인계, 전달, 완료를 Agent lane으로 보여 주는 인간 중심 히스토리
 - **Trace**: 도구, 명령, 파일, 테스트, 오류 필터를 제공하는 저수준 가상화 타임라인
@@ -166,26 +177,31 @@ docs/
 [접근성 검증 가이드](docs/accessibility.md)에는 명암비 측정값, 자동화 범위,
 수동 릴리스 체크리스트가 정리되어 있습니다.
 
-React 컴포넌트는 원시 Codex JSON을 직접 사용하지 않습니다. 알려진 엔벌로프는
+React 컴포넌트는 원시 provider 레코드를 직접 사용하지 않습니다. 알려진 엔벌로프는
 관대하게 정규화하고, 추가 필드를 허용하며, 잘못된 이벤트는 크기가 제한된 디버그
 버퍼로 보내고, 알 수 없는 메서드 때문에 대시보드가 중단되지 않게 합니다.
 
 ## 기능
 
 - 네이티브 근거 기반 상태를 표시하는 접이식 부모/자식 에이전트 목록
+- 장애가 격리된 하나의 composite runtime에서 Codex와 Claude 동시 표시
+- Provider 상태 및 provider/session/workspace/status/검색 필터
+- 설정, 빈 상태, 권한, 미지원 버전, 부분 장애에 대한 복구 안내
 - 시맨틱 HTML 노드와 SVG 연결선으로 구성한 루트/서브에이전트 트리
+- 근거 출처가 표시되는 spawn, task, handoff, message 관계
 - 그래프 이동, 확대·축소, 맞춤, 키보드 선택, 활성 선택 강조
 - 에이전트 목록, 그래프 노드, Inspector에 관측된 모델과 추론 강도 표시
 - 에이전트 필터 및 노드별 마커가 있는 관측된 스킬/워크플로 문맥
 - 관측 순서/상태/업데이트 정렬을 지원하는 근거 기반 Workflow Board
-- 송신자, 수신자, 메시지 내용, 완료 상태를 명시하는 Human/Agent 실행 히스토리
+- 송신자, 수신자, 완료 상태를 명시하는 Human/Agent 실행 히스토리. 내용은 fixture 또는 명시적 opt-in에서만 제한적으로 표시
 - Git 스타일 Agent lane을 사용하는 Story, Messages, 저수준 Trace 보기
 - 가상화된 최근 활동, 스레드, 작업 디렉터리, 선택적 토큰 사용량을 제공하는 Inspector
 - 필터와 300개 이벤트 메모리 제한이 있는 가상화 활동 타임라인
 - 명시적인 승인 및 사용자 입력 대기 사유
+- Claude Agent Teams beta 역할, task 조정, peer message, shutdown 근거
 - 연결 상태 및 지터가 적용된 지수 백오프 재연결
 - 선택적으로 사용할 수 있는 크기 제한 프로토콜 디버그 패널
-- Mock 시나리오 A, B 및 35개 에이전트 스트레스 모드
+- Mock 시나리오 A, B, demo 및 35개 에이전트 스트레스 모드
 - 에이전트 목록 → 그래프 → 활동 순서의 반응형 재배치
 
 상태를 추측하지 않습니다.
@@ -203,11 +219,13 @@ collab completed       → COMPLETED
 
 ## 플랫폼 지원
 
-| 플랫폼 | Real Mode 탐색 방식 | 상태 |
-| --- | --- | --- |
-| Linux / WSL2 | `/proc`에서 대화형 프로세스의 cwd를 읽음 | 지원됨, WSL2 Linux에서 로컬 검증 |
-| macOS | `ps`로 Codex 프로세스를 찾고 `lsof`로 cwd를 확인 | 구현됨, 네이티브 기기 검증 예정 |
-| Windows | PowerShell CIM으로 Codex 프로세스를 찾고 `-C`/`--cd`가 있으면 사용, 없으면 Codex 상태에서 가장 최근 루트를 선택 | 구현됨, 네이티브 기기 검증 예정 |
+| Provider | 플랫폼 | Real Mode 탐색 방식 | 상태 |
+| --- | --- | --- | --- |
+| Codex | Linux / WSL2 | `/proc`에서 대화형 프로세스의 cwd를 읽음 | 지원됨, WSL2 Linux에서 로컬 검증 |
+| Codex | macOS | `ps`로 프로세스를 찾고 `lsof`로 cwd를 확인 | 구현됨, 네이티브 기기 검증 예정 |
+| Codex | Windows | PowerShell CIM 사용, `-C`/`--cd`가 없으면 최근 Codex 상태 선택 | 구현됨, 네이티브 기기 검증 예정 |
+| Claude | Linux / WSL2 | procfs cwd와 제한된 transcript 및 Agent Teams 호환성 근거 사용 | 지원됨, WSL2 Linux에서 로컬 검증 |
+| Claude | macOS / Windows | 정확한 live process mapping 없이 transcript-only 기록 탐색 | 호환성 fallback, 네이티브 기기 검증 예정 |
 
 Codex와 Observatory는 같은 OS 환경에서 실행되고 동일한 `CODEX_HOME`을 사용해야
 합니다. 예를 들어 네이티브 Windows에서 실행한 Observatory는 WSL 안에서 실행 중인
@@ -246,6 +264,7 @@ bun run typecheck
 bun run test
 bun run test:e2e
 bun run build
+bun run demo:capture # 안전한 README PNG/GIF 재생성, ffmpeg 필요
 ```
 
 기여 작업은 단기 브랜치와 `main` 대상 Pull Request를 사용합니다. 브랜치, 리뷰,
@@ -276,11 +295,13 @@ Main ●
 
 ```bash
 OBSERVATORY_SCENARIO=b bun run dev
+OBSERVATORY_SCENARIO=demo bun run dev
 OBSERVATORY_SCENARIO=stress bun run dev
 ```
 
 - `a`: 생성, 활동, 완료, 승인 대기, 복구
 - `b`: 중첩된 프런트엔드/테스트 에이전트, 완료된 백엔드, 실패한 리뷰어
+- `demo`: 결정론적 Codex + Claude provider, 관계, 필터, workflow 데모
 - `stress`: 결정론적 상태/활동 업데이트가 계속되는 35개 에이전트
 
 ## Real Codex Mode
@@ -308,7 +329,8 @@ bun run dev:real
 | `OBSERVATORY_CWD` | 공유 모드에서 `all` | 정확한 작업 디렉터리 필터. 비활성화하려면 `all` 사용 |
 | `OBSERVATORY_ROOT_THREAD_ID` | 미설정 | 루트 하나와 그 자손만 포함 |
 | `OBSERVATORY_CODEX_TRANSPORT` | `shared` | `shared`, `standalone` 또는 실험적 `proxy` |
-| `OBSERVATORY_SCENARIO` | `a` | Mock 픽스처: `a`, `b` 또는 `stress` |
+| `OBSERVATORY_SCENARIO` | `a` | Mock 픽스처: `a`, `b`, `demo` 또는 `stress` |
+| `OBSERVATORY_CAPTURE_CONTENT` | 미설정 | 기본 metadata-only. 로컬 브라우저에서 제한된 provider 내용을 보려면 `1`로 설정 |
 
 예시:
 
@@ -360,6 +382,16 @@ codex-cli 0.149.0
 필드 추가를 허용하는 방식으로 파싱하므로 다른 Codex 버전도 동작할 수 있지만,
 바인딩을 다시 생성하고 테스트를 통과하기 전까지 공식 지원한다고 간주하지 않습니다.
 
+## Real Claude Code Mode
+
+Claude 관측은 버전을 인식하는 읽기 전용 호환성 어댑터입니다. Linux에서는 활성 작업
+디렉터리를 찾고, 크기가 제한된 root/subagent transcript tail과 Agent Teams beta의
+config, task, mailbox 메타데이터를 읽습니다. Prompt, response, thinking, command,
+tool input, task 내용, mailbox 본문은 보관하지 않습니다. 다른 플랫폼은 현재
+transcript-only 기록 탐색을 사용합니다. 공식 hook과 OpenTelemetry는 향후 정확도
+향상 항목입니다. 근거, 개인정보, 버전 경계는
+[Claude 호환성 문서](docs/claude-compatibility.md)를 참고하세요.
+
 ## 프로토콜 생성
 
 설치된 Codex 버전을 변경한 후 다음을 실행합니다.
@@ -393,7 +425,7 @@ codex app-server generate-json-schema --out ./generated/codex-schema-experimenta
 ## 테스트
 
 ```bash
-bun run test         # 단위, 통합, CLI, UI 테스트 40개
+bun run test         # 단위, 통합, CLI, UI 테스트 스위트
 bun run test:e2e     # Chromium Mock 생명주기
 bun run build        # 타입 검사 + 프로덕션 프런트엔드 빌드
 ```

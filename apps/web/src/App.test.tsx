@@ -387,6 +387,24 @@ describe("dashboard interactions", () => {
     }
   });
 
+  it("hides the mock transport badge when a demo supplies real provider identities", () => {
+    const demoSnapshot: ObservatorySnapshot = {
+      ...snapshot,
+      agents: {
+        codex: { ...snapshot.agents.root!, id: "codex", threadId: "codex", provider: "codex", children: [] },
+        claude: { ...snapshot.agents.tester!, id: "claude", threadId: "claude", provider: "claude", children: [] },
+      },
+      providerConnections: {
+        mock: { phase: "connected", attempt: 0 },
+        codex: { phase: "connected", attempt: 0 },
+        claude: { phase: "connected", attempt: 0 },
+      },
+      runtime: { ...snapshot.runtime, adapter: "mock", provider: "mock", scenario: "demo" },
+    };
+
+    expect(getProviderHealth(demoSnapshot).map((provider) => provider.provider)).toEqual(["codex", "claude"]);
+  });
+
   it("shows actionable no-session guidance and copies a credential-free launch command", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });

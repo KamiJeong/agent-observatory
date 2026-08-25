@@ -538,7 +538,7 @@ code {
   background: #101315;
   border: 1px solid var(--line);
   display: flex;
-  left: 50%;
+  left: calc(50% - 60px);
   padding: 2px;
   position: absolute;
   top: 7px;

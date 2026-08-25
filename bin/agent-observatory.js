@@ -20,7 +20,7 @@ Options:
   --cwd <path|all>       Restrict Real Mode to one working directory
   --root-thread <id>     Restrict Real Mode to one root thread tree
   --transport <mode>     shared, standalone, or proxy (default: shared)
-  --scenario <name>      Mock scenario: a, b, or stress (default: a)
+  --scenario <name>      Mock scenario: a, b, demo, or stress (default: a)
   --open                 Open the dashboard in the default browser
   --no-open              Do not open a browser
   -h, --help             Show this help
@@ -32,6 +32,7 @@ Examples:
   bunx agent-observatory --real --provider all
   bunx agent-observatory --real --provider claude
   bunx agent-observatory --real --cwd /projects/design-system
+  bunx agent-observatory --scenario demo --no-open
   bunx agent-observatory --scenario stress --no-open
 `;
 
@@ -84,9 +85,9 @@ if (values.transport && !transports.has(values.transport)) {
   process.exit(1);
 }
 
-const scenarios = new Set(["a", "b", "stress"]);
+const scenarios = new Set(["a", "b", "demo", "stress"]);
 if (values.scenario && !scenarios.has(values.scenario)) {
-  console.error(`Invalid scenario: ${values.scenario}. Use a, b, or stress.`);
+  console.error(`Invalid scenario: ${values.scenario}. Use a, b, demo, or stress.`);
   process.exit(1);
 }
 

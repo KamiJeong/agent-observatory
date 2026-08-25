@@ -125,6 +125,12 @@ export function getProviderHealth(snapshot: ObservatorySnapshot): ProviderHealth
     });
   }
 
+  if (fallback === "mock" && health.size > 1) {
+    const mock = health.get("mock");
+    const hasSimulatedProvider = [...health.values()].some((provider) => provider.provider !== "mock" && provider.agentCount > 0);
+    if (mock?.agentCount === 0 && hasSimulatedProvider) health.delete("mock");
+  }
+
   if (health.size === 0) {
     const provider = normalizeProvider(fallback) ?? "unknown";
     health.set(provider, { provider, phase: "unknown", agentCount: 0 });
