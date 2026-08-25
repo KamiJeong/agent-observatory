@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   analyze:
-    name: CodeQL
+    name: CodeQL analysis
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

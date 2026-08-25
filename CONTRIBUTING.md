@@ -10,8 +10,8 @@ CI checks before merge.
 2. Create a short-lived branch from the latest `main`.
 3. Make the change, add tests, and run the local checks.
 4. Open a pull request using the repository template.
-5. Resolve review comments and wait for the `Quality`, `E2E`, and `CodeQL`
-   checks.
+5. Resolve review comments and wait for the `Quality`, `E2E`, and
+   `CodeQL analysis` checks.
 6. Squash-merge after approval and all required checks pass.
 
 Use these branch prefixes:
@@ -53,10 +53,10 @@ Action references use reviewed full commit SHAs. The workflow uses the
 `GITHUB_TOKEN` and without repository secrets; do not replace it with
 `pull_request_target` or add secrets to the analysis job.
 
-Merging requires both the stable `CodeQL` job and a CodeQL code-scanning result.
-The repository ruleset blocks an analysis that is missing or still running, as
-well as security alerts rated high or critical. A failed workflow also blocks
-the required `CodeQL` status check.
+Merging requires both the stable `CodeQL analysis` job and a CodeQL
+code-scanning result. The repository ruleset blocks an analysis that is missing
+or still running, as well as security alerts rated high or critical. A failed
+workflow also blocks the required `CodeQL analysis` status check.
 
 If CodeQL does not report on a pull request:
 
