@@ -3,6 +3,7 @@ import type * as React from "react";
 import type { ActivityKind, AgentActivity, AgentNode, ObservatorySnapshot } from "@observatory/core";
 import { agentProvider, formatDuration, formatTime, ProviderBadge, shortId, StatusBadge, type TimelineFilter } from "../shared/presentation.tsx";
 import { RunHistory, type RunHistoryMode } from "./RunHistory.tsx";
+import { agentBranchIds } from "./agent-scope.ts";
 
 function filterKinds(filter: TimelineFilter, kind: ActivityKind): boolean {
   if (filter === "all") return true;
@@ -16,14 +17,15 @@ function filterKinds(filter: TimelineFilter, kind: ActivityKind): boolean {
 const TIMELINE_ITEM_HEIGHT = 76;
 const TIMELINE_OVERSCAN = 6;
 
-export function ActivityTimeline({ snapshot }: { snapshot: ObservatorySnapshot }) {
+export function ActivityTimeline({ snapshot, selectedId }: { snapshot: ObservatorySnapshot; selectedId?: string }) {
   const [filter, setFilter] = useState<TimelineFilter>("all");
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
   const listRef = useRef<HTMLOListElement>(null);
   const previousFirstActivityId = useRef<string | undefined>(undefined);
+  const branchIds = useMemo(() => agentBranchIds(snapshot, selectedId), [selectedId, snapshot.agents]);
   const activities = useMemo(
-    () => snapshot.activities.filter((activity) => filterKinds(filter, activity.kind)),
-    [filter, snapshot.activities],
+    () => snapshot.activities.filter((activity) => branchIds.has(activity.agentId) && filterKinds(filter, activity.kind)),
+    [branchIds, filter, snapshot.activities],
   );
   const firstIndex = Math.max(0, Math.floor(viewport.scrollTop / TIMELINE_ITEM_HEIGHT) - TIMELINE_OVERSCAN);
   const lastIndex = Math.min(
@@ -69,7 +71,12 @@ export function ActivityTimeline({ snapshot }: { snapshot: ObservatorySnapshot }
     <div className="timeline">
       <div className="filter-tabs" aria-label="Activity filters">
         {(["all", "agent", "tool", "file", "command", "error"] as const).map((option) => (
-          <button key={option} data-active={filter === option || undefined} onClick={() => selectFilter(option)}>
+          <button
+            key={option}
+            data-active={filter === option || undefined}
+            disabled={!selectedId}
+            onClick={() => selectFilter(option)}
+          >
             {option[0]?.toUpperCase()}{option.slice(1)}
           </button>
         ))}
@@ -114,7 +121,11 @@ export function ActivityTimeline({ snapshot }: { snapshot: ObservatorySnapshot }
             </li>
           );
         })}
-        {activities.length === 0 && <li className="timeline__empty">No matching activity.</li>}
+        {activities.length === 0 && (
+          <li className="timeline__empty">
+            {selectedId ? "No matching activity for this agent branch." : "Select an agent to view its timeline."}
+          </li>
+        )}
       </ol>
     </div>
   );
@@ -122,6 +133,40 @@ export function ActivityTimeline({ snapshot }: { snapshot: ObservatorySnapshot }
 
 export function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
   return <div className="detail-row"><dt>{label}</dt><dd>{children}</dd></div>;
+}
+
+function TokenUsagePanel({ usage }: { usage?: AgentNode["tokenUsage"] }) {
+  const values = usage
+    ? [
+        ["Input", usage.inputTokens],
+        ["Cached", usage.cachedInputTokens],
+        ["Output", usage.outputTokens],
+        ["Reasoning", usage.reasoningOutputTokens],
+      ] as const
+    : [];
+  const hasUsage = usage
+    ? Object.values(usage).some((value) => value !== undefined)
+    : false;
+  return (
+    <section className="inspector__usage" aria-labelledby="inspector-token-usage">
+      <div className="inspector__usage-heading">
+        <h4 id="inspector-token-usage">Token usage</h4>
+        {usage?.totalTokens !== undefined && <strong>{usage.totalTokens.toLocaleString()}</strong>}
+      </div>
+      {hasUsage
+        ? <dl className="inspector__usage-grid">
+            {values.map(([label, value]) => value !== undefined && (
+              <div key={label}><dt>{label}</dt><dd>{value.toLocaleString()}</dd></div>
+            ))}
+            {usage?.modelContextWindow !== undefined && (
+              <div className="inspector__usage-context">
+                <dt>Context window</dt><dd>{usage.modelContextWindow.toLocaleString()}</dd>
+              </div>
+            )}
+          </dl>
+        : <p>Not reported by this provider.</p>}
+    </section>
+  );
 }
 
 const RECENT_ACTIVITY_ITEM_HEIGHT = 40;
@@ -218,6 +263,7 @@ function Inspector({ agent, snapshot, now }: { agent: AgentNode; snapshot: Obser
         <h3>{agent.nickname ?? shortId(agent.id)}</h3>
         <StatusBadge agent={agent} />
       </div>
+      <TokenUsagePanel usage={agent.tokenUsage} />
       <dl className="details">
         <DetailRow label="Provider"><ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} /></DetailRow>
         {(agent.evidenceSources?.length ?? 0) > 0 && (
@@ -240,9 +286,6 @@ function Inspector({ agent, snapshot, now }: { agent: AgentNode; snapshot: Obser
         )}
         <DetailRow label="Thread"><code title={agent.threadId}>{shortId(agent.threadId)}</code></DetailRow>
         {agent.cwd && <DetailRow label="Working directory"><code title={agent.cwd}>{agent.cwd}</code></DetailRow>}
-        {agent.tokenUsage?.totalTokens !== undefined && (
-          <DetailRow label="Tokens">{agent.tokenUsage.totalTokens.toLocaleString()}</DetailRow>
-        )}
       </dl>
       <div className="inspector__recent">
         <div className="inspector__recent-heading">
@@ -293,8 +336,8 @@ export function RightRail({
                 ))}
               </div>
               {historyMode === "trace"
-                ? <ActivityTimeline snapshot={snapshot} />
-                : <RunHistory snapshot={snapshot} mode={historyMode} />}
+                ? <ActivityTimeline snapshot={snapshot} selectedId={selectedId} />
+                : <RunHistory snapshot={snapshot} selectedId={selectedId} mode={historyMode} />}
             </div>
           )}
     </aside>

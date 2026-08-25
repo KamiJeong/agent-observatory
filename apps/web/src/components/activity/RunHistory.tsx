@@ -1,20 +1,18 @@
 import { useMemo, type CSSProperties } from "react";
 import type { HistoryActor, HistoryEvent, ObservatorySnapshot } from "@observatory/core";
 import { agentProvider, formatTime, ProviderBadge, roleColor, shortId } from "../shared/presentation.tsx";
+import { agentBranchIds, historyEventIsInBranch } from "./agent-scope.ts";
 
 export type RunHistoryMode = "story" | "messages";
+
+const STORY_KINDS: HistoryEvent["kind"][] = ["request", "decision", "handoff", "delivery", "completion"];
+const MESSAGE_KINDS: HistoryEvent["kind"][] = ["request", "handoff", "delivery"];
 
 function actorLabel(actor: HistoryActor, snapshot: ObservatorySnapshot): string {
   if (actor.type === "human") return "Human";
   if (actor.type === "system") return "System";
   const agent = actor.id ? snapshot.agents[actor.id] : undefined;
   return agent?.nickname ?? agent?.role ?? actor.label ?? (actor.id ? shortId(actor.id) : "Agent");
-}
-
-function actorDepth(actor: HistoryActor, snapshot: ObservatorySnapshot): number {
-  if (actor.type === "human") return 0;
-  if (actor.type === "system") return 1;
-  return Math.min(4, Math.max(1, (actor.id ? snapshot.agents[actor.id]?.depth : undefined) ?? 1));
 }
 
 function actorColor(actor: HistoryActor, snapshot: ObservatorySnapshot): string {
@@ -57,29 +55,32 @@ function HistoryContent({ content }: { content: string }) {
   );
 }
 
-export function RunHistory({ snapshot, mode = "story" }: { snapshot: ObservatorySnapshot; mode?: RunHistoryMode }) {
+export function RunHistory({
+  snapshot,
+  selectedId,
+  mode = "story",
+}: {
+  snapshot: ObservatorySnapshot;
+  selectedId?: string;
+  mode?: RunHistoryMode;
+}) {
+  const branchIds = useMemo(() => agentBranchIds(snapshot, selectedId), [selectedId, snapshot.agents]);
   const events = useMemo(() => [...snapshot.history]
-    .filter((event) => mode === "story" || ["request", "handoff", "delivery"].includes(event.kind))
-    .sort((a, b) => a.occurredAt - b.occurredAt), [mode, snapshot.history]);
+    .filter((event) => historyEventIsInBranch(event, branchIds))
+    .filter((event) => (mode === "story" ? STORY_KINDS : MESSAGE_KINDS).includes(event.kind))
+    .filter((event) => event.kind !== "delivery" || event.source !== "derived")
+    .sort((a, b) => a.occurredAt - b.occurredAt), [branchIds, mode, snapshot.history]);
 
   return (
     <ol className="run-history" aria-label={`${mode === "story" ? "Run history" : "Messages"}, ${events.length} events`}>
       {events.map((event) => {
-        const depth = actorDepth(event.actor, snapshot);
-        const recipientDepth = event.recipients?.[0] ? actorDepth(event.recipients[0], snapshot) : depth;
         const style = {
-          "--history-depth": depth,
-          "--history-target-depth": recipientDepth,
-          "--history-branch-left": Math.min(depth, recipientDepth),
-          "--history-branch-width": Math.abs(depth - recipientDepth),
           "--history-color": actorColor(event.actor, snapshot),
         } as CSSProperties;
         return (
           <li className={`history-event history-event--${event.kind}`} key={event.id} style={style}>
             <time dateTime={new Date(event.occurredAt).toISOString()}>{formatTime(event.occurredAt)}</time>
             <span className="history-event__graph" aria-hidden="true">
-              <i className="history-event__line" />
-              {recipientDepth !== depth && <i className="history-event__branch" />}
               <i className="history-event__node" />
             </span>
             <article>
@@ -97,7 +98,10 @@ export function RunHistory({ snapshot, mode = "story" }: { snapshot: Observatory
       })}
       {events.length === 0 && (
         <li className="run-history__empty">
-          No narrative history yet.<small>Trace still contains low-level execution activity.</small>
+          {selectedId ? "No narrative history for this agent branch yet." : "Select an agent to view its run history."}
+          <small>{selectedId
+            ? "Timeline may still contain low-level execution activity."
+            : "History is scoped to the selected agent and its children."}</small>
         </li>
       )}
     </ol>
