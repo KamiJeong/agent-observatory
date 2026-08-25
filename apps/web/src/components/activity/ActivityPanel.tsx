@@ -13,7 +13,7 @@ function filterKinds(filter: TimelineFilter, kind: ActivityKind): boolean {
   return kind === "error";
 }
 
-const TIMELINE_ITEM_HEIGHT = 64;
+const TIMELINE_ITEM_HEIGHT = 76;
 const TIMELINE_OVERSCAN = 6;
 
 export function ActivityTimeline({ snapshot }: { snapshot: ObservatorySnapshot }) {
@@ -121,8 +121,8 @@ export function DetailRow({ label, children }: { label: string; children: React.
   return <div className="detail-row"><dt>{label}</dt><dd>{children}</dd></div>;
 }
 
-const RECENT_ACTIVITY_ITEM_HEIGHT = 32;
-const RECENT_ACTIVITY_MAX_HEIGHT = 224;
+const RECENT_ACTIVITY_ITEM_HEIGHT = 40;
+const RECENT_ACTIVITY_MAX_HEIGHT = 280;
 const RECENT_ACTIVITY_OVERSCAN = 4;
 
 export function RecentActivityList({ activities }: { activities: AgentActivity[] }) {

@@ -2,8 +2,8 @@ import type { ObservatorySnapshot } from "@observatory/core";
 
 export interface Point { x: number; y: number }
 
-export const GRAPH_NODE_WIDTH = 218;
-export const GRAPH_NODE_HEIGHT = 106;
+export const GRAPH_NODE_WIDTH = 240;
+export const GRAPH_NODE_HEIGHT = 124;
 
 interface LayoutBox {
   width: number;
@@ -19,8 +19,8 @@ export function layoutGraph(snapshot: ObservatorySnapshot): {
 } {
   const nodeWidth = GRAPH_NODE_WIDTH;
   const nodeHeight = GRAPH_NODE_HEIGHT;
-  const horizontalGap = 34;
-  const verticalGap = 40;
+  const horizontalGap = 38;
+  const verticalGap = 44;
   const positions: Record<string, Point> = {};
   const memo = new Map<string, LayoutBox>();
   const building = new Set<string>();
