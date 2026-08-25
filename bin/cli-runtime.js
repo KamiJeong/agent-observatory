@@ -23,6 +23,18 @@ export function resolveRuntimeConfiguration(values) {
   };
 }
 
+export function resolveContentCaptureSetting(values, environment, adapter) {
+  const captureContent = Boolean(values["capture-content"]);
+  const noCaptureContent = Boolean(values["no-capture-content"]);
+  if (captureContent && noCaptureContent) {
+    throw new Error("Use either --capture-content or --no-capture-content, not both.");
+  }
+  if (adapter !== "real") return undefined;
+  if (captureContent) return "1";
+  if (noCaptureContent) return "0";
+  return environment.OBSERVATORY_CAPTURE_CONTENT ?? "1";
+}
+
 export function browserCommand(platform, environment, target) {
   if (platform === "darwin") return { file: "open", args: [target] };
   if (platform === "win32") return { file: "cmd", args: ["/c", "start", "", target] };

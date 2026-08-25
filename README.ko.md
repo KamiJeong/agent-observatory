@@ -40,14 +40,19 @@ Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 �
 
 ## 빠른 시작
 
-### bunx로 바로 실행
+### bunx 또는 npx로 바로 실행
 
 npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 모든 활성 workspace의
 Codex와 Claude를 함께 선택하는 Real Mode이며, 실행 후 브라우저가 자동으로 열립니다.
 
 ```bash
 bunx agent-observatory
+npx agent-observatory
 ```
+
+두 실행 방식 모두 Real Mode에서 크기가 제한된 Human 요청과 agent 응답 내용을
+기본으로 포함합니다. 대시보드를 metadata-only 모드로 유지하려면
+`--no-capture-content`를 사용하세요.
 
 필요하면 Real Mode를 한 provider로 제한할 수 있습니다. 명시적인 `--real` 옵션도
 호환성을 위해 계속 지원하지만 더 이상 필수는 아닙니다.
@@ -342,13 +347,20 @@ bun run dev:real
 | `OBSERVATORY_ROOT_THREAD_ID` | 미설정 | 루트 하나와 그 자손만 포함 |
 | `OBSERVATORY_CODEX_TRANSPORT` | `shared` | `shared`, `standalone` 또는 실험적 `proxy` |
 | `OBSERVATORY_SCENARIO` | `a` | Mock 픽스처: `a`, `b`, `demo` 또는 `stress` |
-| `OBSERVATORY_CAPTURE_CONTENT` | 미설정 | 기본 metadata-only. 로컬 브라우저에서 제한된 provider 내용을 보려면 `1`로 설정 |
+| `OBSERVATORY_CAPTURE_CONTENT` | 공개 CLI와 `dev:real`에서는 `1`, 서버에서는 미설정 | 로컬 브라우저에 크기가 제한된 provider 내용을 표시. metadata-only 모드에는 `0` 사용 |
 
 예시:
 
 ```bash
 bun run dev:real -- --root-thread 019f...
+bun run dev:real -- --provider codex,claude
+bun run dev:real -- --no-capture-content
 ```
+
+`dev:real`은 크기가 제한된 Human 요청과 agent 응답 내용을 기본으로 포함합니다.
+도구 입력, thinking, 명령, 경로 및 도구 결과 본문은 계속 제외됩니다. 로컬
+대시보드를 metadata-only 모드로 유지하려면 `--no-capture-content` 또는
+`OBSERVATORY_CAPTURE_CONTENT=0`을 사용하세요.
 
 ### 실시간 관측 범위
 

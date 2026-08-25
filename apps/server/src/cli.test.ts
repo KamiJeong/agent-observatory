@@ -3,7 +3,12 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { browserCommand, resolveRuntimeConfiguration, selectAvailablePort } from "../../../bin/cli-runtime.js";
+import {
+  browserCommand,
+  resolveContentCaptureSetting,
+  resolveRuntimeConfiguration,
+  selectAvailablePort,
+} from "../../../bin/cli-runtime.js";
 
 const cliPath = fileURLToPath(new URL("../../../bin/agent-observatory.js", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -42,6 +47,27 @@ describe("agent-observatory CLI", () => {
     expect(resolveRuntimeConfiguration({ scenario: "demo" })).toEqual({ adapter: "mock", providers: undefined, cwd: undefined });
     expect(() => resolveRuntimeConfiguration({ real: true, mock: true })).toThrow("Use either --real or --mock");
     expect(() => resolveRuntimeConfiguration({ real: true, scenario: "demo" })).toThrow("scenarios run in Mock Mode");
+  });
+
+  it("enables content capture by default in Real Mode while preserving explicit overrides", () => {
+    expect(resolveContentCaptureSetting({}, {}, "real")).toBe("1");
+    expect(resolveContentCaptureSetting({}, { OBSERVATORY_CAPTURE_CONTENT: "0" }, "real")).toBe("0");
+    expect(resolveContentCaptureSetting(
+      { "capture-content": true },
+      { OBSERVATORY_CAPTURE_CONTENT: "0" },
+      "real",
+    )).toBe("1");
+    expect(resolveContentCaptureSetting(
+      { "no-capture-content": true },
+      { OBSERVATORY_CAPTURE_CONTENT: "1" },
+      "real",
+    )).toBe("0");
+    expect(resolveContentCaptureSetting({}, {}, "mock")).toBeUndefined();
+    expect(() => resolveContentCaptureSetting(
+      { "capture-content": true, "no-capture-content": true },
+      {},
+      "real",
+    )).toThrow("Use either --capture-content or --no-capture-content");
   });
 
   it("falls back from an occupied preferred port but honors an explicit port", async () => {
@@ -124,8 +150,11 @@ describe("agent-observatory CLI", () => {
 
   it("starts the combined Codex and Claude runtime by default", async () => {
     const port = await findFreePort();
+    const environment = { ...process.env };
+    delete environment.OBSERVATORY_CAPTURE_CONTENT;
     const child = spawn(process.execPath, [cliPath, "--port", String(port), "--no-open"], {
       cwd: repositoryRoot,
+      env: environment,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -153,8 +182,11 @@ describe("agent-observatory CLI", () => {
       const snapshot = await response.json();
 
       expect(snapshot.runtime.adapter).toBe("composite");
+      expect(snapshot.runtime.contentCapture).toBe("enabled");
       expect(snapshot.runtime.providers.map((provider: { provider: string }) => provider.provider))
         .toEqual(["codex", "claude"]);
+      expect(snapshot.runtime.providers.map((provider: { contentCapture: string }) => provider.contentCapture))
+        .toEqual(["enabled", "enabled"]);
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         const exited = once(child, "exit");
@@ -172,6 +204,8 @@ describe("agent-observatory CLI", () => {
     expect(help.status).toBe(0);
     expect(help.stdout).toContain("--mock");
     expect(help.stdout).toContain("--provider <name>");
+    expect(help.stdout).toContain("--capture-content");
+    expect(help.stdout).toContain("--no-capture-content");
     expect(help.stdout).toContain("codex, claude, or all (default: all)");
     expect(help.stdout).toContain("--scenario demo");
 
@@ -181,6 +215,17 @@ describe("agent-observatory CLI", () => {
     });
     expect(invalid.status).toBe(1);
     expect(invalid.stderr).toContain("Invalid provider: unknown. Use codex, claude, or all.");
+
+    const conflicting = spawnSync(process.execPath, [
+      cliPath,
+      "--capture-content",
+      "--no-capture-content",
+    ], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+    });
+    expect(conflicting.status).toBe(1);
+    expect(conflicting.stderr).toContain("Use either --capture-content or --no-capture-content");
   });
 
   it("keeps the server running when the platform browser command is missing", async () => {

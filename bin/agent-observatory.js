@@ -4,7 +4,12 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { browserCommand, resolveRuntimeConfiguration, selectAvailablePort } from "./cli-runtime.js";
+import {
+  browserCommand,
+  resolveContentCaptureSetting,
+  resolveRuntimeConfiguration,
+  selectAvailablePort,
+} from "./cli-runtime.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const help = `agent-observatory ${packageJson.version}
@@ -23,6 +28,8 @@ Options:
   --root-thread <id>     Restrict Real Mode to one root thread tree
   --transport <mode>     shared, standalone, or proxy (default: shared)
   --scenario <name>      Mock scenario: a, b, demo, or stress (implies --mock)
+  --capture-content      Include bounded request and response text (Real Mode default)
+  --no-capture-content   Keep Real Mode in metadata-only mode
   --open                 Open the dashboard in the default browser
   --no-open              Do not open a browser
   -h, --help             Show this help
@@ -50,6 +57,8 @@ try {
       "root-thread": { type: "string" },
       transport: { type: "string" },
       scenario: { type: "string" },
+      "capture-content": { type: "boolean" },
+      "no-capture-content": { type: "boolean" },
       open: { type: "boolean" },
       "no-open": { type: "boolean" },
       help: { type: "boolean", short: "h" },
@@ -101,8 +110,10 @@ if (values.provider && !providers.has(values.provider)) {
 }
 
 let runtime;
+let captureContentSetting;
 try {
   runtime = resolveRuntimeConfiguration(values);
+  captureContentSetting = resolveContentCaptureSetting(values, process.env, runtime.adapter);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
@@ -126,6 +137,7 @@ if (runtime.cwd) process.env.OBSERVATORY_CWD = runtime.cwd;
 if (values["root-thread"]) process.env.OBSERVATORY_ROOT_THREAD_ID = values["root-thread"];
 if (values.transport) process.env.OBSERVATORY_CODEX_TRANSPORT = values.transport;
 if (values.scenario) process.env.OBSERVATORY_SCENARIO = values.scenario;
+if (captureContentSetting !== undefined) process.env.OBSERVATORY_CAPTURE_CONTENT = captureContentSetting;
 
 const accessToken = randomBytes(32).toString("base64url");
 process.env.OBSERVATORY_ACCESS_TOKEN = accessToken;
