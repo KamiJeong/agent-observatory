@@ -1,8 +1,663 @@
 // apps/server/src/index.ts
-import { existsSync as existsSync2, createReadStream } from "node:fs";
-import { createServer } from "node:http";
-import { extname, join as join3, normalize } from "node:path";
+import { sep } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// apps/server/src/access-token.ts
+import { randomBytes } from "node:crypto";
+function consumeAccessToken(environment = process.env) {
+  const configured = environment.OBSERVATORY_ACCESS_TOKEN;
+  delete environment.OBSERVATORY_ACCESS_TOKEN;
+  return configured ?? randomBytes(32).toString("base64url");
+}
+
+// apps/server/src/codex-adapter.ts
+import { spawn, spawnSync } from "node:child_process";
+import readline from "node:readline";
+
+// apps/server/src/normalize.ts
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : void 0;
+}
+function numberValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function stringArray(value) {
+  if (!Array.isArray(value)) return void 0;
+  const strings = value.filter((item) => typeof item === "string");
+  return strings.length > 0 ? strings : void 0;
+}
+function statusValue(value) {
+  if (!isRecord(value) || typeof value.type !== "string") return { type: "notLoaded" };
+  if (value.type === "active") {
+    return {
+      type: "active",
+      activeFlags: Array.isArray(value.activeFlags) ? value.activeFlags.filter((flag) => typeof flag === "string") : []
+    };
+  }
+  if (value.type === "idle" || value.type === "systemError" || value.type === "notLoaded") {
+    return { type: value.type };
+  }
+  return { type: "notLoaded" };
+}
+function spawnedSource(source) {
+  if (!isRecord(source)) return void 0;
+  const subAgent = isRecord(source.subAgent) ? source.subAgent : isRecord(source.subagent) ? source.subagent : void 0;
+  if (!subAgent || !isRecord(subAgent.thread_spawn)) return void 0;
+  return subAgent.thread_spawn;
+}
+function toThreadSnapshot(value) {
+  if (!isRecord(value) || typeof value.id !== "string") return void 0;
+  const spawn2 = spawnedSource(value.source);
+  const parentThreadId = stringValue(value.parentThreadId) ?? stringValue(spawn2?.parent_thread_id);
+  const nickname = stringValue(value.agentNickname) ?? stringValue(spawn2?.agent_nickname);
+  const role = stringValue(value.agentRole) ?? stringValue(spawn2?.agent_role);
+  const model = stringValue(value.model);
+  const reasoningEffort = stringValue(value.reasoningEffort) ?? stringValue(value.effort);
+  const observedSkills = stringArray(value.observedSkills);
+  const observedWorkflows = stringArray(value.observedWorkflows);
+  const collaborationMode = stringValue(value.collaborationMode);
+  const createdAtSeconds = numberValue(value.createdAt);
+  const updatedAtSeconds = numberValue(value.updatedAt);
+  return {
+    id: value.id,
+    ...stringValue(value.sessionId) ? { sessionId: stringValue(value.sessionId) } : {},
+    ...parentThreadId ? { parentThreadId } : {},
+    ...stringValue(value.forkedFromId) ? { forkedFromId: stringValue(value.forkedFromId) } : {},
+    ...nickname ? { nickname } : {},
+    ...role ? { role } : {},
+    nativeStatus: statusValue(value.status),
+    ...createdAtSeconds !== void 0 ? { createdAt: createdAtSeconds * 1e3 } : {},
+    ...updatedAtSeconds !== void 0 ? { updatedAt: updatedAtSeconds * 1e3 } : {},
+    ...stringValue(value.cwd) ? { cwd: stringValue(value.cwd) } : {},
+    ...model ? { model } : {},
+    ...stringValue(value.modelProvider) ? { modelProvider: stringValue(value.modelProvider) } : {},
+    ...reasoningEffort ? { reasoningEffort } : {},
+    ...observedSkills ? { observedSkills } : {},
+    ...observedWorkflows ? { observedWorkflows } : {},
+    ...collaborationMode ? { collaborationMode } : {},
+    ...value.source !== void 0 ? { source: value.source } : {},
+    ...numberValue(spawn2?.depth) !== void 0 ? { depth: numberValue(spawn2?.depth) } : {},
+    ...stringValue(spawn2?.agent_path) ? { path: stringValue(spawn2?.agent_path) } : {}
+  };
+}
+function commandLooksLikeTest(command) {
+  return /(^|\s)(vitest|jest|pytest|go test|cargo test|npm (run )?test|pnpm (run )?test|bun (run )?test)(\s|$)/i.test(
+    command
+  );
+}
+function itemOutcome(item) {
+  if (item.status === "failed") return "failed";
+  if (item.status === "declined") return "declined";
+  if (item.status === "completed") return "completed";
+  return void 0;
+}
+function activityFromItem(item, threadId, at, completed) {
+  const id = stringValue(item.id) ?? `${threadId}:${at}`;
+  const base = {
+    id,
+    agentId: threadId,
+    startedAt: completed ? at - (numberValue(item.durationMs) ?? 0) : at,
+    ...completed ? { completedAt: at } : {},
+    ...itemOutcome(item) ? { outcome: itemOutcome(item) } : {}
+  };
+  switch (item.type) {
+    case "reasoning":
+      return { ...base, kind: "thinking", title: "Thinking" };
+    case "commandExecution": {
+      const command = stringValue(item.command) ?? "Command";
+      const actions = Array.isArray(item.commandActions) ? item.commandActions.filter(isRecord) : [];
+      const onlyReads = actions.length > 0 && actions.every(
+        (action) => action.type === "read" || action.type === "listFiles" || action.type === "search"
+      );
+      const kind = commandLooksLikeTest(command) ? "test" : onlyReads ? "read" : "command";
+      return {
+        ...base,
+        kind,
+        title: kind === "test" ? "Running tests" : kind === "read" ? "Reading workspace" : "Running command",
+        detail: command,
+        metadata: {
+          cwd: item.cwd,
+          exitCode: item.exitCode,
+          commandActions: item.commandActions
+        }
+      };
+    }
+    case "fileChange": {
+      const changes = Array.isArray(item.changes) ? item.changes.filter(isRecord) : [];
+      const paths = changes.map((change) => stringValue(change.path)).filter((path2) => Boolean(path2));
+      return {
+        ...base,
+        kind: "write",
+        title: paths.length === 1 ? `Editing ${paths[0]}` : `Editing ${paths.length} files`,
+        ...paths.length > 0 ? { detail: paths.join(", ") } : {},
+        metadata: { changes: changes.map(({ path: path2, kind }) => ({ path: path2, kind })) }
+      };
+    }
+    case "mcpToolCall":
+      return {
+        ...base,
+        kind: "tool",
+        title: `${stringValue(item.server) ?? "MCP"} \xB7 ${stringValue(item.tool) ?? "tool"}`
+      };
+    case "dynamicToolCall":
+      return {
+        ...base,
+        kind: "tool",
+        title: [stringValue(item.namespace), stringValue(item.tool)].filter(Boolean).join(" \xB7 ") || "Tool call"
+      };
+    case "collabAgentToolCall":
+      return {
+        ...base,
+        kind: "tool",
+        title: `Agent \xB7 ${stringValue(item.tool) ?? "collaboration"}`,
+        ...stringValue(item.prompt) ? { detail: stringValue(item.prompt) } : {},
+        metadata: { receiverThreadIds: item.receiverThreadIds }
+      };
+    case "subAgentActivity":
+      return {
+        ...base,
+        kind: "message",
+        title: `Subagent ${stringValue(item.kind) ?? "activity"}`,
+        detail: stringValue(item.agentPath) ?? stringValue(item.agentThreadId)
+      };
+    case "agentMessage":
+      return {
+        ...base,
+        kind: "message",
+        title: "Agent message",
+        ...stringValue(item.text) ? { detail: stringValue(item.text)?.slice(0, 240) } : {}
+      };
+    case "webSearch":
+      return { ...base, kind: "tool", title: "Searching the web" };
+    case "imageView":
+      return { ...base, kind: "read", title: "Viewing image", detail: stringValue(item.path) };
+    case "imageGeneration":
+      return { ...base, kind: "tool", title: "Generating image" };
+    case "sleep":
+      return { ...base, kind: "tool", title: "Waiting on timer" };
+    case "contextCompaction":
+      return { ...base, kind: "thinking", title: "Compacting context" };
+    default:
+      return { ...base, kind: "unknown", title: stringValue(item.type) ?? "Unknown activity" };
+  }
+}
+function lifecycleEvents(item, at) {
+  if (item.type !== "collabAgentToolCall" || !isRecord(item.agentsStates)) return [];
+  const events = [];
+  for (const [threadId, state] of Object.entries(item.agentsStates)) {
+    if (!isRecord(state) || typeof state.status !== "string") continue;
+    const allowed = [
+      "pendingInit",
+      "running",
+      "interrupted",
+      "completed",
+      "errored",
+      "shutdown",
+      "notFound"
+    ];
+    if (!allowed.includes(state.status)) continue;
+    events.push({
+      type: "agent.lifecycle",
+      at,
+      threadId,
+      status: state.status,
+      ...stringValue(state.message) ? { message: stringValue(state.message) } : {}
+    });
+  }
+  return events;
+}
+function requestReason(method) {
+  if (method === "item/tool/requestUserInput") return { reason: "userInput", title: "Waiting for user input" };
+  if (method === "mcpServer/elicitation/request") return { reason: "elicitation", title: "Waiting for MCP input" };
+  if (method.includes("requestApproval") || method === "applyPatchApproval" || method === "execCommandApproval") {
+    return { reason: "approval", title: "Waiting for approval" };
+  }
+  return void 0;
+}
+function tokenUsage(value) {
+  if (!isRecord(value)) return {};
+  const total = isRecord(value.total) ? value.total : value;
+  return {
+    ...numberValue(total.inputTokens) !== void 0 ? { inputTokens: numberValue(total.inputTokens) } : {},
+    ...numberValue(total.cachedInputTokens) !== void 0 ? { cachedInputTokens: numberValue(total.cachedInputTokens) } : {},
+    ...numberValue(total.outputTokens) !== void 0 ? { outputTokens: numberValue(total.outputTokens) } : {},
+    ...numberValue(total.reasoningOutputTokens) !== void 0 ? { reasoningOutputTokens: numberValue(total.reasoningOutputTokens) } : {},
+    ...numberValue(total.totalTokens) !== void 0 ? { totalTokens: numberValue(total.totalTokens) } : {},
+    ...numberValue(value.modelContextWindow) !== void 0 ? { modelContextWindow: numberValue(value.modelContextWindow) } : {}
+  };
+}
+function normalizeEnvelope(envelope, at = Date.now()) {
+  const method = envelope.method;
+  const params = isRecord(envelope.params) ? envelope.params : {};
+  if (!method) return [];
+  const request = requestReason(method);
+  if (request && envelope.id !== void 0) {
+    const threadId = stringValue(params.threadId);
+    if (!threadId) return [];
+    const pending = {
+      id: String(envelope.id),
+      agentId: threadId,
+      reason: request.reason,
+      title: request.title,
+      ...stringValue(params.reason) ? { detail: stringValue(params.reason) } : {},
+      openedAt: numberValue(params.startedAtMs) ?? at
+    };
+    return [
+      { type: "request.opened", at, request: pending },
+      {
+        type: "activity.started",
+        at,
+        activity: {
+          id: `request:${pending.id}`,
+          agentId: threadId,
+          kind: "approval",
+          title: pending.title,
+          ...pending.detail ? { detail: pending.detail } : {},
+          startedAt: pending.openedAt
+        }
+      }
+    ];
+  }
+  switch (method) {
+    case "thread/started": {
+      const thread = toThreadSnapshot(params.thread);
+      return thread ? [{ type: "thread.discovered", at, thread }] : [];
+    }
+    case "thread/status/changed": {
+      const threadId = stringValue(params.threadId);
+      return threadId ? [{ type: "thread.status", at, threadId, status: statusValue(params.status) }] : [];
+    }
+    case "turn/started": {
+      const turn = isRecord(params.turn) ? params.turn : {};
+      const threadId = stringValue(params.threadId);
+      const turnId = stringValue(turn.id);
+      return threadId && turnId ? [{ type: "turn.started", at, threadId, turnId }] : [];
+    }
+    case "turn/completed": {
+      const turn = isRecord(params.turn) ? params.turn : {};
+      const threadId = stringValue(params.threadId);
+      const turnId = stringValue(turn.id);
+      const status = stringValue(turn.status);
+      if (!threadId || !turnId || !status || !["completed", "interrupted", "failed"].includes(status)) return [];
+      const error = isRecord(turn.error) ? stringValue(turn.error.message) : void 0;
+      return [{
+        type: "turn.completed",
+        at,
+        threadId,
+        turnId,
+        status,
+        ...error ? { error } : {}
+      }];
+    }
+    case "item/started":
+    case "item/completed": {
+      const item = isRecord(params.item) ? params.item : void 0;
+      const threadId = stringValue(params.threadId);
+      if (!item || !threadId) return [];
+      const completed = method === "item/completed";
+      const activity = activityFromItem(item, threadId, at, completed);
+      const activityEvent = completed ? {
+        type: "activity.completed",
+        at,
+        threadId,
+        activityId: activity.id,
+        activity,
+        ...activity.outcome ? { outcome: activity.outcome } : {}
+      } : { type: "activity.started", at, activity };
+      return [activityEvent, ...lifecycleEvents(item, at)];
+    }
+    case "serverRequest/resolved": {
+      const requestId = params.requestId;
+      if (typeof requestId !== "string" && typeof requestId !== "number") return [];
+      return [{
+        type: "request.resolved",
+        at,
+        requestId: String(requestId),
+        ...stringValue(params.threadId) ? { threadId: stringValue(params.threadId) } : {}
+      }];
+    }
+    case "thread/tokenUsage/updated": {
+      const threadId = stringValue(params.threadId);
+      return threadId ? [{ type: "token.updated", at, threadId, usage: tokenUsage(params.tokenUsage) }] : [];
+    }
+    case "error": {
+      const threadId = stringValue(params.threadId);
+      const error = isRecord(params.error) ? params.error : {};
+      if (!threadId) return [];
+      return [{
+        type: "activity.completed",
+        at,
+        threadId,
+        activityId: `error:${stringValue(params.turnId) ?? at}`,
+        activity: {
+          id: `error:${stringValue(params.turnId) ?? at}`,
+          agentId: threadId,
+          kind: "error",
+          title: "Codex error",
+          detail: stringValue(error.message) ?? "Unknown Codex error",
+          startedAt: at,
+          completedAt: at,
+          outcome: "failed"
+        },
+        outcome: "failed"
+      }];
+    }
+    default:
+      return [];
+  }
+}
+function parseEnvelope(line) {
+  try {
+    const parsed = JSON.parse(line);
+    return isRecord(parsed) ? parsed : void 0;
+  } catch {
+    return void 0;
+  }
+}
+
+// apps/server/src/codex-adapter.ts
+var ALL_SOURCE_KINDS = [
+  "cli",
+  "vscode",
+  "exec",
+  "appServer",
+  "subAgent",
+  "subAgentReview",
+  "subAgentCompact",
+  "subAgentThreadSpawn",
+  "subAgentOther",
+  "unknown"
+];
+function messageFromError(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value !== null && "message" in value && typeof value.message === "string") {
+    return value.message;
+  }
+  return "Unknown App Server error";
+}
+var RealCodexAdapter = class {
+  mode = "codex";
+  #listeners = /* @__PURE__ */ new Set();
+  #child;
+  #pending = /* @__PURE__ */ new Map();
+  #nextId = 1;
+  #connected = false;
+  #connectPromise;
+  #closing = false;
+  #reconnectTimer;
+  #attempt = 0;
+  #experimental = true;
+  #strategy = "experimental-descendants";
+  #codexVersion = "unknown";
+  runtimeInfo() {
+    return {
+      adapter: "codex",
+      observatoryVersion: "0.1.0",
+      codexCliVersion: this.#codexVersion,
+      protocolGenerationVersion: "0.149.0",
+      experimentalApi: this.#experimental,
+      discoveryStrategy: this.#strategy
+    };
+  }
+  async connect() {
+    this.#closing = false;
+    if (this.#connected) return;
+    if (this.#connectPromise) return this.#connectPromise;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = void 0;
+    const pending = this.#open().finally(() => {
+      if (this.#connectPromise === pending) this.#connectPromise = void 0;
+    });
+    this.#connectPromise = pending;
+    await pending;
+  }
+  async disconnect() {
+    this.#closing = true;
+    this.#connected = false;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = void 0;
+    this.#child?.kill("SIGTERM");
+    this.#child = void 0;
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("App Server disconnected"));
+    }
+    this.#pending.clear();
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: { phase: "disconnected", attempt: this.#attempt, message: "Disconnected" }
+    });
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  async listThreads(options) {
+    if (options?.rootThreadId && this.#experimental) {
+      try {
+        const descendants = await this.#pageThreads({ ancestorThreadId: options.rootThreadId });
+        this.#strategy = "experimental-descendants";
+        return descendants;
+      } catch (error) {
+        this.#experimental = false;
+        this.#strategy = "compatibility";
+        this.#emit({ type: "runtime.updated", at: Date.now(), runtime: this.runtimeInfo() });
+        this.#debug("connection", "Experimental descendant discovery unavailable; using compatibility mode", error);
+      }
+    }
+    const threads = await this.#pageThreads({});
+    if (!options?.rootThreadId) return threads;
+    const ids = /* @__PURE__ */ new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const thread of threads) {
+        if (thread.parentThreadId === options.rootThreadId || thread.parentThreadId && ids.has(thread.parentThreadId)) {
+          if (!ids.has(thread.id)) {
+            ids.add(thread.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    return threads.filter((thread) => ids.has(thread.id));
+  }
+  async listLoadedThreads() {
+    const result = await this.#request("thread/loaded/list", {});
+    if (!result || typeof result !== "object" || !("data" in result) || !Array.isArray(result.data)) return [];
+    return result.data.filter((id) => typeof id === "string");
+  }
+  async readThread(threadId, options) {
+    const result = await this.#request("thread/read", {
+      threadId,
+      includeTurns: options?.includeTurns ?? false
+    });
+    const thread = result && typeof result === "object" && "thread" in result ? toThreadSnapshot(result.thread) : void 0;
+    if (!thread) throw new Error(`Invalid thread/read response for ${threadId}`);
+    return thread;
+  }
+  async #open() {
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: {
+        phase: this.#attempt === 0 ? "connecting" : "reconnecting",
+        attempt: this.#attempt,
+        message: "Connecting to Codex App Server"
+      }
+    });
+    const version = spawnSync("codex", ["--version"], { encoding: "utf8" });
+    this.#codexVersion = version.stdout.trim().replace(/^codex-cli\s+/, "") || "unknown";
+    const transport = process.env.OBSERVATORY_CODEX_TRANSPORT ?? "standalone";
+    const args = transport === "proxy" ? ["app-server", "proxy"] : ["app-server"];
+    const child = spawn("codex", args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.#child = child;
+    const lines = readline.createInterface({ input: child.stdout });
+    lines.on("line", (line) => this.#onLine(line));
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString("utf8").trim();
+      if (text) this.#debug("protocol", text);
+    });
+    child.once("exit", (code, signal) => this.#onExit(code, signal));
+    try {
+      await this.#request("initialize", {
+        clientInfo: {
+          name: "codex_agent_observatory",
+          title: "Codex Agent Observatory",
+          version: "0.1.0"
+        },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false
+        }
+      });
+      this.#send({ method: "initialized", params: {} });
+      this.#connected = true;
+      this.#attempt = 0;
+      this.#emit({
+        type: "connection.changed",
+        at: Date.now(),
+        connection: {
+          phase: "connected",
+          attempt: 0,
+          message: args.at(-1) === "proxy" ? "Connected through App Server daemon" : "Connected to child App Server"
+        }
+      });
+      this.#emit({ type: "runtime.updated", at: Date.now(), runtime: this.runtimeInfo() });
+      await this.#refreshDiscovery();
+    } catch (error) {
+      child.kill("SIGTERM");
+      throw error;
+    }
+  }
+  async #refreshDiscovery() {
+    const rootThreadId = process.env.OBSERVATORY_ROOT_THREAD_ID;
+    const threads = rootThreadId ? [await this.readThread(rootThreadId), ...await this.listThreads({ rootThreadId })] : await this.listThreads();
+    for (const thread of threads) this.#emit({ type: "thread.discovered", at: Date.now(), thread });
+  }
+  async #pageThreads(extra) {
+    const all = [];
+    const configuredCwd = process.env.OBSERVATORY_CWD ?? process.env.INIT_CWD ?? process.cwd();
+    let cursor = null;
+    do {
+      const result = await this.#request("thread/list", {
+        ...extra,
+        cursor,
+        limit: 100,
+        sourceKinds: ALL_SOURCE_KINDS,
+        archived: false
+      });
+      if (!result || typeof result !== "object") break;
+      const data = "data" in result && Array.isArray(result.data) ? result.data : [];
+      for (const value of data) {
+        const thread = toThreadSnapshot(value);
+        if (thread) all.push(thread);
+      }
+      cursor = "nextCursor" in result && typeof result.nextCursor === "string" ? result.nextCursor : null;
+    } while (cursor);
+    return configuredCwd === "all" || "ancestorThreadId" in extra ? all : all.filter((thread) => thread.cwd === configuredCwd);
+  }
+  #request(method, params) {
+    const id = this.#nextId++;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`${method} timed out after 10 seconds`));
+      }, 1e4);
+      this.#pending.set(id, { resolve, reject, timeout });
+      try {
+        this.#send({ method, id, params });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.#pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+  #send(envelope) {
+    if (!this.#child?.stdin.writable) throw new Error("Codex App Server stdin is not writable");
+    this.#child.stdin.write(`${JSON.stringify(envelope)}
+`);
+    this.#debug("protocol", `\u2192 ${envelope.method ?? "response"}`, envelope, "out");
+  }
+  #onLine(line) {
+    const envelope = parseEnvelope(line);
+    if (!envelope) {
+      this.#debug("malformed", "Malformed JSONL message", line);
+      return;
+    }
+    this.#debug("protocol", `\u2190 ${envelope.method ?? "response"}`, envelope);
+    if (envelope.id !== void 0 && !envelope.method) {
+      const pending = this.#pending.get(envelope.id);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.#pending.delete(envelope.id);
+        if (envelope.error !== void 0) pending.reject(new Error(messageFromError(envelope.error)));
+        else pending.resolve(envelope.result);
+      }
+      return;
+    }
+    for (const event of normalizeEnvelope(envelope)) {
+      this.#emit(event);
+      this.#debug("normalized", event.type, event);
+    }
+  }
+  #onExit(code, signal) {
+    this.#connected = false;
+    this.#child = void 0;
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Codex App Server exited"));
+    }
+    this.#pending.clear();
+    if (this.#closing) return;
+    this.#attempt += 1;
+    const base = Math.min(15e3, 500 * 2 ** Math.min(this.#attempt - 1, 5));
+    const delay = base + Math.floor(Math.random() * Math.max(1, base * 0.2));
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      connection: {
+        phase: "reconnecting",
+        attempt: this.#attempt,
+        message: `App Server exited (${code ?? signal ?? "unknown"})`,
+        nextRetryAt: Date.now() + delay
+      }
+    });
+    this.#reconnectTimer = setTimeout(() => {
+      void this.connect().catch((error) => {
+        this.#debug("connection", "Reconnect failed", error);
+      });
+    }, delay);
+  }
+  #emit(event) {
+    for (const listener of this.#listeners) listener(event);
+  }
+  #debug(category, summary, payload, direction = "in") {
+    this.#emit({
+      type: "debug",
+      at: Date.now(),
+      entry: {
+        id: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        at: Date.now(),
+        direction: category === "connection" ? "internal" : direction,
+        category,
+        summary,
+        ...payload !== void 0 ? { payload } : {}
+      }
+    });
+  }
+};
+
+// apps/server/src/http-server.ts
+import { timingSafeEqual } from "node:crypto";
+import { createReadStream, existsSync } from "node:fs";
+import { createServer } from "node:http";
+import path, { extname } from "node:path";
 
 // packages/observatory-core/src/projector.ts
 var DEFAULT_ACTIVITY_LIMIT = 300;
@@ -318,642 +973,211 @@ var ObservatoryStore = class {
   }
 };
 
-// apps/server/src/index.ts
+// apps/server/src/http-server.ts
 import { WebSocketServer, WebSocket } from "ws";
-
-// apps/server/src/codex-adapter.ts
-import { spawn, spawnSync } from "node:child_process";
-import readline from "node:readline";
-
-// apps/server/src/normalize.ts
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+var MAX_WEBSOCKET_PAYLOAD_BYTES = 8 * 1024;
+var DEFAULT_RETRY_WINDOW_MS = 1e3;
+var securityHeaders = {
+  "cache-control": "no-store",
+  "content-security-policy": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY"
+};
+var contentTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".json": "application/json; charset=utf-8"
+};
+function sendJson(response, status, body, headers = {}) {
+  response.writeHead(status, { ...securityHeaders, "content-type": "application/json; charset=utf-8", ...headers });
+  response.end(JSON.stringify(body));
 }
-function stringValue(value) {
-  return typeof value === "string" ? value : void 0;
+function requestAuthority(request) {
+  const host = request.headers.host;
+  if (!host || Array.isArray(host)) return void 0;
+  const port2 = request.socket.localPort;
+  if (!port2) return void 0;
+  const allowed = port2 === 80 ? ["127.0.0.1", "localhost", "127.0.0.1:80", "localhost:80"] : [`127.0.0.1:${port2}`, `localhost:${port2}`];
+  return allowed.includes(host) ? new URL(`http://${host}`).origin : void 0;
 }
-function numberValue(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+function hasTrustedOrigin(request, authority, devWebOrigins2 = [], requireOrigin = false) {
+  const origin = request.headers.origin;
+  if (!origin) return !requireOrigin;
+  return origin === authority || devWebOrigins2.includes(origin);
 }
-function stringArray(value) {
-  if (!Array.isArray(value)) return void 0;
-  const strings = value.filter((item) => typeof item === "string");
-  return strings.length > 0 ? strings : void 0;
+function isPathWithin(root, candidate, pathOperations = path) {
+  const relativePath = pathOperations.relative(pathOperations.resolve(root), pathOperations.resolve(candidate));
+  return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${pathOperations.sep}`) && !pathOperations.isAbsolute(relativePath);
 }
-function statusValue(value) {
-  if (!isRecord(value) || typeof value.type !== "string") return { type: "notLoaded" };
-  if (value.type === "active") {
-    return {
-      type: "active",
-      activeFlags: Array.isArray(value.activeFlags) ? value.activeFlags.filter((flag) => typeof flag === "string") : []
-    };
-  }
-  if (value.type === "idle" || value.type === "systemError" || value.type === "notLoaded") {
-    return { type: value.type };
-  }
-  return { type: "notLoaded" };
+function tokenMatches(provided, expected) {
+  if (!provided) return false;
+  const actualBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(expected);
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
-function spawnedSource(source) {
-  if (!isRecord(source)) return void 0;
-  const subAgent = isRecord(source.subAgent) ? source.subAgent : isRecord(source.subagent) ? source.subagent : void 0;
-  if (!subAgent || !isRecord(subAgent.thread_spawn)) return void 0;
-  return subAgent.thread_spawn;
+function bearerToken(request) {
+  const authorization = request.headers.authorization;
+  return authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : void 0;
 }
-function toThreadSnapshot(value) {
-  if (!isRecord(value) || typeof value.id !== "string") return void 0;
-  const spawn2 = spawnedSource(value.source);
-  const parentThreadId = stringValue(value.parentThreadId) ?? stringValue(spawn2?.parent_thread_id);
-  const nickname = stringValue(value.agentNickname) ?? stringValue(spawn2?.agent_nickname);
-  const role = stringValue(value.agentRole) ?? stringValue(spawn2?.agent_role);
-  const model = stringValue(value.model);
-  const reasoningEffort = stringValue(value.reasoningEffort) ?? stringValue(value.effort);
-  const observedSkills = stringArray(value.observedSkills);
-  const observedWorkflows = stringArray(value.observedWorkflows);
-  const collaborationMode = stringValue(value.collaborationMode);
-  const createdAtSeconds = numberValue(value.createdAt);
-  const updatedAtSeconds = numberValue(value.updatedAt);
-  return {
-    id: value.id,
-    ...stringValue(value.sessionId) ? { sessionId: stringValue(value.sessionId) } : {},
-    ...parentThreadId ? { parentThreadId } : {},
-    ...stringValue(value.forkedFromId) ? { forkedFromId: stringValue(value.forkedFromId) } : {},
-    ...nickname ? { nickname } : {},
-    ...role ? { role } : {},
-    nativeStatus: statusValue(value.status),
-    ...createdAtSeconds !== void 0 ? { createdAt: createdAtSeconds * 1e3 } : {},
-    ...updatedAtSeconds !== void 0 ? { updatedAt: updatedAtSeconds * 1e3 } : {},
-    ...stringValue(value.cwd) ? { cwd: stringValue(value.cwd) } : {},
-    ...model ? { model } : {},
-    ...stringValue(value.modelProvider) ? { modelProvider: stringValue(value.modelProvider) } : {},
-    ...reasoningEffort ? { reasoningEffort } : {},
-    ...observedSkills ? { observedSkills } : {},
-    ...observedWorkflows ? { observedWorkflows } : {},
-    ...collaborationMode ? { collaborationMode } : {},
-    ...value.source !== void 0 ? { source: value.source } : {},
-    ...numberValue(spawn2?.depth) !== void 0 ? { depth: numberValue(spawn2?.depth) } : {},
-    ...stringValue(spawn2?.agent_path) ? { path: stringValue(spawn2?.agent_path) } : {}
-  };
+function publicSnapshot(snapshot) {
+  return { ...snapshot, debug: snapshot.debug.map(({ payload: _payload, ...entry }) => entry) };
 }
-function commandLooksLikeTest(command) {
-  return /(^|\s)(vitest|jest|pytest|go test|cargo test|npm (run )?test|pnpm (run )?test|bun (run )?test)(\s|$)/i.test(
-    command
-  );
+function publicEvent(event) {
+  if (event.type !== "debug") return event;
+  const { payload: _payload, ...entry } = event.entry;
+  return { ...event, entry };
 }
-function itemOutcome(item) {
-  if (item.status === "failed") return "failed";
-  if (item.status === "declined") return "declined";
-  if (item.status === "completed") return "completed";
-  return void 0;
+function rejectUpgrade(socket, status) {
+  const reason = status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : "Not Found";
+  socket.end(`HTTP/1.1 ${status} ${reason}\r
+Connection: close\r
+Cache-Control: no-store\r
+Content-Length: 0\r
+\r
+`);
 }
-function activityFromItem(item, threadId, at, completed) {
-  const id = stringValue(item.id) ?? `${threadId}:${at}`;
-  const base = {
-    id,
-    agentId: threadId,
-    startedAt: completed ? at - (numberValue(item.durationMs) ?? 0) : at,
-    ...completed ? { completedAt: at } : {},
-    ...itemOutcome(item) ? { outcome: itemOutcome(item) } : {}
-  };
-  switch (item.type) {
-    case "reasoning":
-      return { ...base, kind: "thinking", title: "Thinking" };
-    case "commandExecution": {
-      const command = stringValue(item.command) ?? "Command";
-      const actions = Array.isArray(item.commandActions) ? item.commandActions.filter(isRecord) : [];
-      const onlyReads = actions.length > 0 && actions.every(
-        (action) => action.type === "read" || action.type === "listFiles" || action.type === "search"
-      );
-      const kind = commandLooksLikeTest(command) ? "test" : onlyReads ? "read" : "command";
-      return {
-        ...base,
-        kind,
-        title: kind === "test" ? "Running tests" : kind === "read" ? "Reading workspace" : "Running command",
-        detail: command,
-        metadata: {
-          cwd: item.cwd,
-          exitCode: item.exitCode,
-          commandActions: item.commandActions
-        }
-      };
-    }
-    case "fileChange": {
-      const changes = Array.isArray(item.changes) ? item.changes.filter(isRecord) : [];
-      const paths = changes.map((change) => stringValue(change.path)).filter((path) => Boolean(path));
-      return {
-        ...base,
-        kind: "write",
-        title: paths.length === 1 ? `Editing ${paths[0]}` : `Editing ${paths.length} files`,
-        ...paths.length > 0 ? { detail: paths.join(", ") } : {},
-        metadata: { changes: changes.map(({ path, kind }) => ({ path, kind })) }
-      };
-    }
-    case "mcpToolCall":
-      return {
-        ...base,
-        kind: "tool",
-        title: `${stringValue(item.server) ?? "MCP"} \xB7 ${stringValue(item.tool) ?? "tool"}`
-      };
-    case "dynamicToolCall":
-      return {
-        ...base,
-        kind: "tool",
-        title: [stringValue(item.namespace), stringValue(item.tool)].filter(Boolean).join(" \xB7 ") || "Tool call"
-      };
-    case "collabAgentToolCall":
-      return {
-        ...base,
-        kind: "tool",
-        title: `Agent \xB7 ${stringValue(item.tool) ?? "collaboration"}`,
-        ...stringValue(item.prompt) ? { detail: stringValue(item.prompt) } : {},
-        metadata: { receiverThreadIds: item.receiverThreadIds }
-      };
-    case "subAgentActivity":
-      return {
-        ...base,
-        kind: "message",
-        title: `Subagent ${stringValue(item.kind) ?? "activity"}`,
-        detail: stringValue(item.agentPath) ?? stringValue(item.agentThreadId)
-      };
-    case "agentMessage":
-      return {
-        ...base,
-        kind: "message",
-        title: "Agent message",
-        ...stringValue(item.text) ? { detail: stringValue(item.text)?.slice(0, 240) } : {}
-      };
-    case "webSearch":
-      return { ...base, kind: "tool", title: "Searching the web" };
-    case "imageView":
-      return { ...base, kind: "read", title: "Viewing image", detail: stringValue(item.path) };
-    case "imageGeneration":
-      return { ...base, kind: "tool", title: "Generating image" };
-    case "sleep":
-      return { ...base, kind: "tool", title: "Waiting on timer" };
-    case "contextCompaction":
-      return { ...base, kind: "thinking", title: "Compacting context" };
-    default:
-      return { ...base, kind: "unknown", title: stringValue(item.type) ?? "Unknown activity" };
-  }
-}
-function lifecycleEvents(item, at) {
-  if (item.type !== "collabAgentToolCall" || !isRecord(item.agentsStates)) return [];
-  const events = [];
-  for (const [threadId, state] of Object.entries(item.agentsStates)) {
-    if (!isRecord(state) || typeof state.status !== "string") continue;
-    const allowed = [
-      "pendingInit",
-      "running",
-      "interrupted",
-      "completed",
-      "errored",
-      "shutdown",
-      "notFound"
-    ];
-    if (!allowed.includes(state.status)) continue;
-    events.push({
-      type: "agent.lifecycle",
-      at,
-      threadId,
-      status: state.status,
-      ...stringValue(state.message) ? { message: stringValue(state.message) } : {}
-    });
-  }
-  return events;
-}
-function requestReason(method) {
-  if (method === "item/tool/requestUserInput") return { reason: "userInput", title: "Waiting for user input" };
-  if (method === "mcpServer/elicitation/request") return { reason: "elicitation", title: "Waiting for MCP input" };
-  if (method.includes("requestApproval") || method === "applyPatchApproval" || method === "execCommandApproval") {
-    return { reason: "approval", title: "Waiting for approval" };
-  }
-  return void 0;
-}
-function tokenUsage(value) {
-  if (!isRecord(value)) return {};
-  const total = isRecord(value.total) ? value.total : value;
-  return {
-    ...numberValue(total.inputTokens) !== void 0 ? { inputTokens: numberValue(total.inputTokens) } : {},
-    ...numberValue(total.cachedInputTokens) !== void 0 ? { cachedInputTokens: numberValue(total.cachedInputTokens) } : {},
-    ...numberValue(total.outputTokens) !== void 0 ? { outputTokens: numberValue(total.outputTokens) } : {},
-    ...numberValue(total.reasoningOutputTokens) !== void 0 ? { reasoningOutputTokens: numberValue(total.reasoningOutputTokens) } : {},
-    ...numberValue(total.totalTokens) !== void 0 ? { totalTokens: numberValue(total.totalTokens) } : {},
-    ...numberValue(value.modelContextWindow) !== void 0 ? { modelContextWindow: numberValue(value.modelContextWindow) } : {}
-  };
-}
-function normalizeEnvelope(envelope, at = Date.now()) {
-  const method = envelope.method;
-  const params = isRecord(envelope.params) ? envelope.params : {};
-  if (!method) return [];
-  const request = requestReason(method);
-  if (request && envelope.id !== void 0) {
-    const threadId = stringValue(params.threadId);
-    if (!threadId) return [];
-    const pending = {
-      id: String(envelope.id),
-      agentId: threadId,
-      reason: request.reason,
-      title: request.title,
-      ...stringValue(params.reason) ? { detail: stringValue(params.reason) } : {},
-      openedAt: numberValue(params.startedAtMs) ?? at
-    };
-    return [
-      { type: "request.opened", at, request: pending },
-      {
-        type: "activity.started",
-        at,
-        activity: {
-          id: `request:${pending.id}`,
-          agentId: threadId,
-          kind: "approval",
-          title: pending.title,
-          ...pending.detail ? { detail: pending.detail } : {},
-          startedAt: pending.openedAt
-        }
-      }
-    ];
-  }
-  switch (method) {
-    case "thread/started": {
-      const thread = toThreadSnapshot(params.thread);
-      return thread ? [{ type: "thread.discovered", at, thread }] : [];
-    }
-    case "thread/status/changed": {
-      const threadId = stringValue(params.threadId);
-      return threadId ? [{ type: "thread.status", at, threadId, status: statusValue(params.status) }] : [];
-    }
-    case "turn/started": {
-      const turn = isRecord(params.turn) ? params.turn : {};
-      const threadId = stringValue(params.threadId);
-      const turnId = stringValue(turn.id);
-      return threadId && turnId ? [{ type: "turn.started", at, threadId, turnId }] : [];
-    }
-    case "turn/completed": {
-      const turn = isRecord(params.turn) ? params.turn : {};
-      const threadId = stringValue(params.threadId);
-      const turnId = stringValue(turn.id);
-      const status = stringValue(turn.status);
-      if (!threadId || !turnId || !status || !["completed", "interrupted", "failed"].includes(status)) return [];
-      const error = isRecord(turn.error) ? stringValue(turn.error.message) : void 0;
-      return [{
-        type: "turn.completed",
-        at,
-        threadId,
-        turnId,
-        status,
-        ...error ? { error } : {}
-      }];
-    }
-    case "item/started":
-    case "item/completed": {
-      const item = isRecord(params.item) ? params.item : void 0;
-      const threadId = stringValue(params.threadId);
-      if (!item || !threadId) return [];
-      const completed = method === "item/completed";
-      const activity = activityFromItem(item, threadId, at, completed);
-      const activityEvent = completed ? {
-        type: "activity.completed",
-        at,
-        threadId,
-        activityId: activity.id,
-        activity,
-        ...activity.outcome ? { outcome: activity.outcome } : {}
-      } : { type: "activity.started", at, activity };
-      return [activityEvent, ...lifecycleEvents(item, at)];
-    }
-    case "serverRequest/resolved": {
-      const requestId = params.requestId;
-      if (typeof requestId !== "string" && typeof requestId !== "number") return [];
-      return [{
-        type: "request.resolved",
-        at,
-        requestId: String(requestId),
-        ...stringValue(params.threadId) ? { threadId: stringValue(params.threadId) } : {}
-      }];
-    }
-    case "thread/tokenUsage/updated": {
-      const threadId = stringValue(params.threadId);
-      return threadId ? [{ type: "token.updated", at, threadId, usage: tokenUsage(params.tokenUsage) }] : [];
-    }
-    case "error": {
-      const threadId = stringValue(params.threadId);
-      const error = isRecord(params.error) ? params.error : {};
-      if (!threadId) return [];
-      return [{
-        type: "activity.completed",
-        at,
-        threadId,
-        activityId: `error:${stringValue(params.turnId) ?? at}`,
-        activity: {
-          id: `error:${stringValue(params.turnId) ?? at}`,
-          agentId: threadId,
-          kind: "error",
-          title: "Codex error",
-          detail: stringValue(error.message) ?? "Unknown Codex error",
-          startedAt: at,
-          completedAt: at,
-          outcome: "failed"
-        },
-        outcome: "failed"
-      }];
-    }
-    default:
-      return [];
-  }
-}
-function parseEnvelope(line) {
-  try {
-    const parsed = JSON.parse(line);
-    return isRecord(parsed) ? parsed : void 0;
-  } catch {
-    return void 0;
-  }
-}
-
-// apps/server/src/codex-adapter.ts
-var ALL_SOURCE_KINDS = [
-  "cli",
-  "vscode",
-  "exec",
-  "appServer",
-  "subAgent",
-  "subAgentReview",
-  "subAgentCompact",
-  "subAgentThreadSpawn",
-  "subAgentOther",
-  "unknown"
-];
-function messageFromError(value) {
-  if (typeof value === "string") return value;
-  if (typeof value === "object" && value !== null && "message" in value && typeof value.message === "string") {
-    return value.message;
-  }
-  return "Unknown App Server error";
-}
-var RealCodexAdapter = class {
-  mode = "codex";
-  #listeners = /* @__PURE__ */ new Set();
-  #child;
-  #pending = /* @__PURE__ */ new Map();
-  #nextId = 1;
-  #connected = false;
-  #closing = false;
-  #reconnectTimer;
-  #attempt = 0;
-  #experimental = true;
-  #strategy = "experimental-descendants";
-  #codexVersion = "unknown";
-  runtimeInfo() {
-    return {
-      adapter: "codex",
-      observatoryVersion: "0.1.0",
-      codexCliVersion: this.#codexVersion,
-      protocolGenerationVersion: "0.149.0",
-      experimentalApi: this.#experimental,
-      discoveryStrategy: this.#strategy
-    };
-  }
-  async connect() {
-    this.#closing = false;
-    await this.#open();
-  }
-  async disconnect() {
-    this.#closing = true;
-    this.#connected = false;
-    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
-    this.#reconnectTimer = void 0;
-    this.#child?.kill("SIGTERM");
-    this.#child = void 0;
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error("App Server disconnected"));
-    }
-    this.#pending.clear();
-    this.#emit({
-      type: "connection.changed",
-      at: Date.now(),
-      connection: { phase: "disconnected", attempt: this.#attempt, message: "Disconnected" }
-    });
-  }
-  subscribe(listener) {
-    this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
-  }
-  async listThreads(options) {
-    if (options?.rootThreadId && this.#experimental) {
-      try {
-        const descendants = await this.#pageThreads({ ancestorThreadId: options.rootThreadId });
-        this.#strategy = "experimental-descendants";
-        return descendants;
-      } catch (error) {
-        this.#experimental = false;
-        this.#strategy = "compatibility";
-        this.#emit({ type: "runtime.updated", at: Date.now(), runtime: this.runtimeInfo() });
-        this.#debug("connection", "Experimental descendant discovery unavailable; using compatibility mode", error);
-      }
-    }
-    const threads = await this.#pageThreads({});
-    if (!options?.rootThreadId) return threads;
-    const ids = /* @__PURE__ */ new Set();
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const thread of threads) {
-        if (thread.parentThreadId === options.rootThreadId || thread.parentThreadId && ids.has(thread.parentThreadId)) {
-          if (!ids.has(thread.id)) {
-            ids.add(thread.id);
-            changed = true;
-          }
-        }
-      }
-    }
-    return threads.filter((thread) => ids.has(thread.id));
-  }
-  async listLoadedThreads() {
-    const result = await this.#request("thread/loaded/list", {});
-    if (!result || typeof result !== "object" || !("data" in result) || !Array.isArray(result.data)) return [];
-    return result.data.filter((id) => typeof id === "string");
-  }
-  async readThread(threadId, options) {
-    const result = await this.#request("thread/read", {
-      threadId,
-      includeTurns: options?.includeTurns ?? false
-    });
-    const thread = result && typeof result === "object" && "thread" in result ? toThreadSnapshot(result.thread) : void 0;
-    if (!thread) throw new Error(`Invalid thread/read response for ${threadId}`);
-    return thread;
-  }
-  async #open() {
-    this.#emit({
-      type: "connection.changed",
-      at: Date.now(),
-      connection: {
-        phase: this.#attempt === 0 ? "connecting" : "reconnecting",
-        attempt: this.#attempt,
-        message: "Connecting to Codex App Server"
-      }
-    });
-    const version = spawnSync("codex", ["--version"], { encoding: "utf8" });
-    this.#codexVersion = version.stdout.trim().replace(/^codex-cli\s+/, "") || "unknown";
-    const transport = process.env.OBSERVATORY_CODEX_TRANSPORT ?? "standalone";
-    const args = transport === "proxy" ? ["app-server", "proxy"] : ["app-server"];
-    const child = spawn("codex", args, { stdio: ["pipe", "pipe", "pipe"] });
-    this.#child = child;
-    const lines = readline.createInterface({ input: child.stdout });
-    lines.on("line", (line) => this.#onLine(line));
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString("utf8").trim();
-      if (text) this.#debug("protocol", text);
-    });
-    child.once("exit", (code, signal) => this.#onExit(code, signal));
-    try {
-      await this.#request("initialize", {
-        clientInfo: {
-          name: "codex_agent_observatory",
-          title: "Codex Agent Observatory",
-          version: "0.1.0"
-        },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false
-        }
-      });
-      this.#send({ method: "initialized", params: {} });
-      this.#connected = true;
-      this.#attempt = 0;
-      this.#emit({
+function createObservatoryHttpServer(options) {
+  const { accessToken: accessToken2, adapter: adapter2, webDist: webDist2, devWebOrigins: devWebOrigins2 } = options;
+  const retryWindowMs = options.retryWindowMs ?? DEFAULT_RETRY_WINDOW_MS;
+  const store = new ObservatoryStore(adapter2.runtimeInfo());
+  const clients = /* @__PURE__ */ new Set();
+  let connectPromise;
+  let connectedOnce = false;
+  let lastRetryAt = Number.NEGATIVE_INFINITY;
+  function connectAdapter2() {
+    if (connectedOnce) return Promise.resolve();
+    if (connectPromise) return connectPromise;
+    const pending = adapter2.connect().then(() => {
+      connectedOnce = true;
+    }).catch((error) => {
+      store.apply({
         type: "connection.changed",
         at: Date.now(),
         connection: {
-          phase: "connected",
+          phase: "disconnected",
           attempt: 0,
-          message: args.at(-1) === "proxy" ? "Connected through App Server daemon" : "Connected to child App Server"
+          message: error instanceof Error ? error.message : String(error)
         }
       });
-      this.#emit({ type: "runtime.updated", at: Date.now(), runtime: this.runtimeInfo() });
-      await this.#refreshDiscovery();
-    } catch (error) {
-      child.kill("SIGTERM");
       throw error;
+    }).finally(() => {
+      if (connectPromise === pending) connectPromise = void 0;
+    });
+    connectPromise = pending;
+    return pending;
+  }
+  function retryAllowed() {
+    const now = Date.now();
+    if (now - lastRetryAt < retryWindowMs) return false;
+    lastRetryAt = now;
+    return true;
+  }
+  adapter2.subscribe((event) => {
+    if (event.type === "connection.changed") {
+      if (event.connection.phase === "connected") connectedOnce = true;
+      if (event.connection.phase === "disconnected" || event.connection.phase === "reconnecting") connectedOnce = false;
     }
-  }
-  async #refreshDiscovery() {
-    const rootThreadId = process.env.OBSERVATORY_ROOT_THREAD_ID;
-    const threads = rootThreadId ? [await this.readThread(rootThreadId), ...await this.listThreads({ rootThreadId })] : await this.listThreads();
-    for (const thread of threads) this.#emit({ type: "thread.discovered", at: Date.now(), thread });
-  }
-  async #pageThreads(extra) {
-    const all = [];
-    const configuredCwd = process.env.OBSERVATORY_CWD ?? process.env.INIT_CWD ?? process.cwd();
-    let cursor = null;
-    do {
-      const result = await this.#request("thread/list", {
-        ...extra,
-        cursor,
-        limit: 100,
-        sourceKinds: ALL_SOURCE_KINDS,
-        archived: false
-      });
-      if (!result || typeof result !== "object") break;
-      const data = "data" in result && Array.isArray(result.data) ? result.data : [];
-      for (const value of data) {
-        const thread = toThreadSnapshot(value);
-        if (thread) all.push(thread);
+    store.apply(event);
+  });
+  store.subscribe((snapshot, event) => {
+    const payload = JSON.stringify({ type: "snapshot", snapshot: publicSnapshot(snapshot), event: publicEvent(event) });
+    for (const client of clients) {
+      if (client.readyState === WebSocket.OPEN) client.send(payload);
+    }
+  });
+  const server2 = createServer((request, response) => {
+    const authority = requestAuthority(request);
+    if (!authority || !hasTrustedOrigin(request, authority, devWebOrigins2)) {
+      sendJson(response, 403, { error: "Forbidden" });
+      return;
+    }
+    const requestUrl = new URL(request.url ?? "/", authority);
+    if (requestUrl.pathname === "/api/health") {
+      sendJson(response, 200, { ok: true, connection: store.snapshot().connection });
+      return;
+    }
+    if (requestUrl.pathname === "/api/snapshot") {
+      if (!tokenMatches(bearerToken(request), accessToken2)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" });
+        return;
       }
-      cursor = "nextCursor" in result && typeof result.nextCursor === "string" ? result.nextCursor : null;
-    } while (cursor);
-    return configuredCwd === "all" || "ancestorThreadId" in extra ? all : all.filter((thread) => thread.cwd === configuredCwd);
-  }
-  #request(method, params) {
-    const id = this.#nextId++;
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.#pending.delete(id);
-        reject(new Error(`${method} timed out after 10 seconds`));
-      }, 1e4);
-      this.#pending.set(id, { resolve, reject, timeout });
+      sendJson(response, 200, publicSnapshot(store.snapshot()));
+      return;
+    }
+    if (requestUrl.pathname === "/api/retry" && request.method === "POST") {
+      if (!tokenMatches(bearerToken(request), accessToken2)) {
+        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" });
+        return;
+      }
+      if (!retryAllowed()) {
+        sendJson(response, 429, { error: "Retry rate limit exceeded" }, { "retry-after": String(Math.max(1, Math.ceil(retryWindowMs / 1e3))) });
+        return;
+      }
+      void connectAdapter2().catch(() => void 0);
+      sendJson(response, 202, { accepted: true });
+      return;
+    }
+    if (requestUrl.pathname.startsWith("/api/")) {
+      sendJson(response, 404, { error: "Not found" });
+      return;
+    }
+    if (requestUrl.pathname === "/" && devWebOrigins2?.[0]) {
+      response.writeHead(302, { ...securityHeaders, location: `${devWebOrigins2[0]}/?token=${encodeURIComponent(accessToken2)}` });
+      response.end();
+      return;
+    }
+    if (!existsSync(webDist2)) {
+      sendJson(response, 404, { error: "Web build not found. Run the Vite development server." });
+      return;
+    }
+    const relative = requestUrl.pathname === "/" ? "index.html" : requestUrl.pathname.slice(1);
+    const candidate = path.resolve(webDist2, relative);
+    const safePath = isPathWithin(webDist2, candidate) && existsSync(candidate) ? candidate : path.resolve(webDist2, "index.html");
+    response.writeHead(200, {
+      ...securityHeaders,
+      "cache-control": safePath.endsWith("index.html") ? "no-store" : "public, max-age=3600",
+      "content-type": contentTypes[extname(safePath)] ?? "application/octet-stream"
+    });
+    createReadStream(safePath).pipe(response);
+  });
+  const webSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES });
+  server2.on("upgrade", (request, socket, head) => {
+    const authority = requestAuthority(request);
+    if (!authority || !hasTrustedOrigin(request, authority, devWebOrigins2, true)) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
+    const requestUrl = new URL(request.url ?? "/", authority);
+    if (requestUrl.pathname !== "/ws") {
+      rejectUpgrade(socket, 404);
+      return;
+    }
+    if (!tokenMatches(requestUrl.searchParams.get("token") ?? void 0, accessToken2)) {
+      rejectUpgrade(socket, 401);
+      return;
+    }
+    webSockets.handleUpgrade(request, socket, head, (client) => webSockets.emit("connection", client, request));
+  });
+  webSockets.on("connection", (socket) => {
+    clients.add(socket);
+    socket.send(JSON.stringify({ type: "snapshot", snapshot: publicSnapshot(store.snapshot()) }));
+    socket.on("close", () => clients.delete(socket));
+    socket.on("error", () => clients.delete(socket));
+    socket.on("message", (message) => {
       try {
-        this.#send({ method, id, params });
-      } catch (error) {
-        clearTimeout(timeout);
-        this.#pending.delete(id);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        const parsed = JSON.parse(message.toString());
+        if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "retry" && retryAllowed()) {
+          void connectAdapter2().catch(() => void 0);
+        }
+      } catch {
       }
     });
-  }
-  #send(envelope) {
-    if (!this.#child?.stdin.writable) throw new Error("Codex App Server stdin is not writable");
-    this.#child.stdin.write(`${JSON.stringify(envelope)}
-`);
-    this.#debug("protocol", `\u2192 ${envelope.method ?? "response"}`, envelope, "out");
-  }
-  #onLine(line) {
-    const envelope = parseEnvelope(line);
-    if (!envelope) {
-      this.#debug("malformed", "Malformed JSONL message", line);
-      return;
-    }
-    this.#debug("protocol", `\u2190 ${envelope.method ?? "response"}`, envelope);
-    if (envelope.id !== void 0 && !envelope.method) {
-      const pending = this.#pending.get(envelope.id);
-      if (pending) {
-        clearTimeout(pending.timeout);
-        this.#pending.delete(envelope.id);
-        if (envelope.error !== void 0) pending.reject(new Error(messageFromError(envelope.error)));
-        else pending.resolve(envelope.result);
-      }
-      return;
-    }
-    for (const event of normalizeEnvelope(envelope)) {
-      this.#emit(event);
-      this.#debug("normalized", event.type, event);
-    }
-  }
-  #onExit(code, signal) {
-    this.#connected = false;
-    this.#child = void 0;
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error("Codex App Server exited"));
-    }
-    this.#pending.clear();
-    if (this.#closing) return;
-    this.#attempt += 1;
-    const base = Math.min(15e3, 500 * 2 ** Math.min(this.#attempt - 1, 5));
-    const delay = base + Math.floor(Math.random() * Math.max(1, base * 0.2));
-    this.#emit({
-      type: "connection.changed",
-      at: Date.now(),
-      connection: {
-        phase: "reconnecting",
-        attempt: this.#attempt,
-        message: `App Server exited (${code ?? signal ?? "unknown"})`,
-        nextRetryAt: Date.now() + delay
-      }
-    });
-    this.#reconnectTimer = setTimeout(() => {
-      void this.#open().catch((error) => {
-        this.#debug("connection", "Reconnect failed", error);
-      });
-    }, delay);
-  }
-  #emit(event) {
-    for (const listener of this.#listeners) listener(event);
-  }
-  #debug(category, summary, payload, direction = "in") {
-    this.#emit({
-      type: "debug",
-      at: Date.now(),
-      entry: {
-        id: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
-        at: Date.now(),
-        direction: category === "connection" ? "internal" : direction,
-        category,
-        summary,
-        ...payload !== void 0 ? { payload } : {}
-      }
-    });
-  }
-};
+  });
+  return { server: server2, webSockets, connectAdapter: connectAdapter2, store };
+}
 
 // apps/server/src/mock-adapter.ts
 var active = (flags = []) => ({ type: "active", activeFlags: flags });
@@ -1175,7 +1399,7 @@ var MockCodexAdapter = class {
 // apps/server/src/shared-state-adapter.ts
 import {
   closeSync,
-  existsSync,
+  existsSync as existsSync2,
   fstatSync,
   openSync,
   readSync,
@@ -1511,8 +1735,8 @@ function activityTitle(name) {
       return { kind: "tool", title: name.replaceAll("_", " ") || "Tool call" };
   }
 }
-function skillNameFromPath(path) {
-  const parts = path.split("/").filter(Boolean);
+function skillNameFromPath(path2) {
+  const parts = path2.split("/").filter(Boolean);
   if (parts.at(-1) !== "SKILL.md") return void 0;
   const name = parts.at(-2);
   if (!name || name === "skills") return void 0;
@@ -1668,8 +1892,8 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
     activities
   };
 }
-function readRolloutTail(path) {
-  const fd = openSync(path, "r");
+function readRolloutTail(path2) {
+  const fd = openSync(path2, "r");
   try {
     const size = fstatSync(fd).size;
     const start = Math.max(0, size - ROLLOUT_TAIL_BYTES);
@@ -1724,6 +1948,7 @@ var SharedStateCodexAdapter = class {
   #refreshTimer;
   #safetyTimer;
   #connected = false;
+  #connectPromise;
   #refreshing = false;
   #refreshQueued = false;
   #codexVersion = "unknown";
@@ -1750,6 +1975,14 @@ var SharedStateCodexAdapter = class {
   }
   async connect() {
     if (this.#connected) return;
+    if (this.#connectPromise) return this.#connectPromise;
+    const pending = this.#connectOnce().finally(() => {
+      if (this.#connectPromise === pending) this.#connectPromise = void 0;
+    });
+    this.#connectPromise = pending;
+    await pending;
+  }
+  async #connectOnce() {
     this.#emit({
       type: "connection.changed",
       at: Date.now(),
@@ -1828,7 +2061,7 @@ var SharedStateCodexAdapter = class {
       this.#debug("Unable to watch Codex state database", error);
     }
     const sessions = join2(codexHome, "sessions");
-    if (existsSync(sessions)) {
+    if (existsSync2(sessions)) {
       try {
         this.#watchers.push(watch(sessions, { recursive: true }, (_event, file) => {
           if (!file || String(file).endsWith(".jsonl")) schedule();
@@ -1906,7 +2139,7 @@ var SharedStateCodexAdapter = class {
         const id = stringValue2(row.id);
         if (!id || !selected.has(id)) continue;
         const rolloutPath = stringValue2(row.rollout_path);
-        if (!rolloutPath || !existsSync(rolloutPath)) continue;
+        if (!rolloutPath || !existsSync2(rolloutPath)) continue;
         const isRoot = !stringValue2(row.parent_thread_id);
         const processActive = isRoot && selectedRoots.has(id);
         const file = statSync(rolloutPath);
@@ -1929,8 +2162,8 @@ var SharedStateCodexAdapter = class {
       }
       this.#threads = next;
       const activePaths = new Set([...next.values()].map((thread) => thread.rolloutPath));
-      for (const path of this.#rolloutCache.keys()) {
-        if (!activePaths.has(path)) this.#rolloutCache.delete(path);
+      for (const path2 of this.#rolloutCache.keys()) {
+        if (!activePaths.has(path2)) this.#rolloutCache.delete(path2);
       }
       for (const thread of next.values()) this.#projectThread(thread);
       const activities = [...next.values()].flatMap((thread) => thread.rollout.activities).sort((a, b) => a.startedAt - b.startedAt).slice(-GLOBAL_ACTIVITY_LIMIT);
@@ -2013,91 +2246,21 @@ var SharedStateCodexAdapter = class {
 };
 
 // apps/server/src/index.ts
+var accessToken = consumeAccessToken();
 var port = Number(process.env.OBSERVATORY_PORT ?? 4317);
 var realTransport = process.env.OBSERVATORY_CODEX_TRANSPORT ?? "shared";
 var adapter = process.env.OBSERVATORY_ADAPTER === "codex" ? realTransport === "shared" ? new SharedStateCodexAdapter() : new RealCodexAdapter() : new MockCodexAdapter(process.env.OBSERVATORY_SCENARIO ?? "a");
-var store = new ObservatoryStore(adapter.runtimeInfo());
-var clients = /* @__PURE__ */ new Set();
-adapter.subscribe((event) => store.apply(event));
-store.subscribe((snapshot, event) => {
-  const payload = JSON.stringify({ type: "snapshot", snapshot, event });
-  for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
-  }
-});
 var webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
-var contentTypes = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".json": "application/json; charset=utf-8"
-};
-var server = createServer((request, response) => {
-  const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  if (requestUrl.pathname === "/api/health") {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true, connection: store.snapshot().connection }));
-    return;
-  }
-  if (requestUrl.pathname === "/api/snapshot") {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify(store.snapshot()));
-    return;
-  }
-  if (requestUrl.pathname === "/api/retry" && request.method === "POST") {
-    void adapter.connect().catch((error) => {
-      const event = {
-        type: "connection.changed",
-        at: Date.now(),
-        connection: { phase: "disconnected", attempt: 0, message: error instanceof Error ? error.message : String(error) }
-      };
-      store.apply(event);
-    });
-    response.writeHead(202).end();
-    return;
-  }
-  if (!existsSync2(webDist)) {
-    response.writeHead(404, { "content-type": "application/json" });
-    response.end(JSON.stringify({ error: "Web build not found. Run the Vite development server." }));
-    return;
-  }
-  const relative = requestUrl.pathname === "/" ? "index.html" : requestUrl.pathname.slice(1);
-  const candidate = normalize(join3(webDist, relative));
-  const safePath = candidate.startsWith(webDist) && existsSync2(candidate) ? candidate : join3(webDist, "index.html");
-  response.writeHead(200, { "content-type": contentTypes[extname(safePath)] ?? "application/octet-stream" });
-  createReadStream(safePath).pipe(response);
-});
-var webSockets = new WebSocketServer({ server, path: "/ws" });
-webSockets.on("connection", (socket) => {
-  clients.add(socket);
-  socket.send(JSON.stringify({ type: "snapshot", snapshot: store.snapshot() }));
-  socket.on("close", () => clients.delete(socket));
-  socket.on("message", (message) => {
-    try {
-      const parsed = JSON.parse(message.toString());
-      if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "retry") {
-        void adapter.connect();
-      }
-    } catch {
-    }
-  });
-});
+var runningFromSource = fileURLToPath(import.meta.url).includes(`${sep}src${sep}`);
+var webPort = Number(process.env.OBSERVATORY_WEB_PORT ?? 4318);
+var devWebOrigins = runningFromSource ? [`http://127.0.0.1:${webPort}`, `http://localhost:${webPort}`] : void 0;
+var { server, connectAdapter } = createObservatoryHttpServer({ accessToken, adapter, webDist, devWebOrigins });
 server.listen(port, "127.0.0.1", () => {
-  console.log(`Codex Agent Observatory server: http://127.0.0.1:${port}`);
+  const dashboardOrigin = devWebOrigins?.[0] ?? `http://127.0.0.1:${port}`;
+  console.log(`Codex Agent Observatory server: ${dashboardOrigin}/?token=${encodeURIComponent(accessToken)}`);
   console.log(`Adapter: ${adapter.mode}`);
 });
-void adapter.connect().catch((error) => {
-  store.apply({
-    type: "connection.changed",
-    at: Date.now(),
-    connection: {
-      phase: "disconnected",
-      attempt: 0,
-      message: error instanceof Error ? error.message : String(error)
-    }
-  });
-});
+void connectAdapter().catch(() => void 0);
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
     void adapter.disconnect().finally(() => server.close(() => process.exit(0)));

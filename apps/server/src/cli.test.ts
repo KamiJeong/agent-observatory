@@ -40,7 +40,11 @@ describe("agent-observatory CLI", () => {
       env: { ...process.env, PATH: "/path/without/xdg-open" },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
@@ -55,10 +59,20 @@ describe("agent-observatory CLI", () => {
         }
       });
       await waitUntil(() => stderr.includes("Could not open a browser automatically"));
+      await waitUntil(() => /\?token=[A-Za-z0-9_-]{40,}/.test(stdout));
 
       expect(child.exitCode).toBeNull();
+      expect(stderr).toMatch(/\?token=[A-Za-z0-9_-]{40,}/);
       const health = await fetch(`http://127.0.0.1:${port}/api/health`);
       expect(health.ok).toBe(true);
+      const token = stdout.match(/\?token=([A-Za-z0-9_-]{40,})/)?.[1];
+      expect(token).toBeTruthy();
+      const unauthorized = await fetch(`http://127.0.0.1:${port}/api/snapshot`);
+      expect(unauthorized.status).toBe(401);
+      const snapshot = await fetch(`http://127.0.0.1:${port}/api/snapshot`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(snapshot.status).toBe(200);
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         const exited = once(child, "exit");

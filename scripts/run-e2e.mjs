@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 
 const serverPort = process.env.OBSERVATORY_E2E_SERVER_PORT ?? "4417";
 const webPort = process.env.OBSERVATORY_E2E_WEB_PORT ?? "4418";
 const webUrl = `http://127.0.0.1:${webPort}`;
+const accessToken = randomBytes(32).toString("base64url");
 const stripAnsi = (value) => value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
 
 const dev = spawn("bun", ["run", "dev"], {
@@ -10,6 +12,7 @@ const dev = spawn("bun", ["run", "dev"], {
   env: {
     ...process.env,
     OBSERVATORY_ADAPTER: "mock",
+    OBSERVATORY_ACCESS_TOKEN: accessToken,
     OBSERVATORY_PORT: serverPort,
     OBSERVATORY_SCENARIO: "a",
     OBSERVATORY_WEB_PORT: webPort,
@@ -53,7 +56,11 @@ try {
   await ready;
   const test = spawn("bunx", ["playwright", "test"], {
     cwd: process.cwd(),
-    env: { ...process.env, OBSERVATORY_WEB_URL: webUrl },
+    env: {
+      ...process.env,
+      OBSERVATORY_E2E_ACCESS_TOKEN: accessToken,
+      OBSERVATORY_WEB_URL: webUrl,
+    },
     stdio: "inherit",
   });
   const code = await new Promise((resolve) => test.once("exit", (exitCode) => resolve(exitCode ?? 1)));

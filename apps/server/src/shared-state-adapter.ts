@@ -361,6 +361,7 @@ export class SharedStateCodexAdapter implements CodexAdapter {
   #refreshTimer?: ReturnType<typeof setTimeout>;
   #safetyTimer?: ReturnType<typeof setInterval>;
   #connected = false;
+  #connectPromise?: Promise<void>;
   #refreshing = false;
   #refreshQueued = false;
   #codexVersion = "unknown";
@@ -395,6 +396,15 @@ export class SharedStateCodexAdapter implements CodexAdapter {
 
   async connect(): Promise<void> {
     if (this.#connected) return;
+    if (this.#connectPromise) return this.#connectPromise;
+    const pending = this.#connectOnce().finally(() => {
+      if (this.#connectPromise === pending) this.#connectPromise = undefined;
+    });
+    this.#connectPromise = pending;
+    await pending;
+  }
+
+  async #connectOnce(): Promise<void> {
     this.#emit({
       type: "connection.changed",
       at: Date.now(),

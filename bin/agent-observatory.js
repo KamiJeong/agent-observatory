@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
@@ -92,7 +93,10 @@ if (values["root-thread"]) process.env.OBSERVATORY_ROOT_THREAD_ID = values["root
 if (values.transport) process.env.OBSERVATORY_CODEX_TRANSPORT = values.transport;
 if (values.scenario) process.env.OBSERVATORY_SCENARIO = values.scenario;
 
-const url = `http://127.0.0.1:${port}`;
+const accessToken = randomBytes(32).toString("base64url");
+process.env.OBSERVATORY_ACCESS_TOKEN = accessToken;
+const baseUrl = `http://127.0.0.1:${port}`;
+const url = `${baseUrl}/?token=${encodeURIComponent(accessToken)}`;
 const shouldOpen = values.open || (!values["no-open"] && process.stdout.isTTY && !process.env.CI);
 
 function openBrowser(target) {
@@ -116,7 +120,7 @@ function openBrowser(target) {
 async function openWhenReady() {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
-      const response = await fetch(`${url}/api/health`);
+      const response = await fetch(`${baseUrl}/api/health`);
       if (response.ok) {
         openBrowser(url);
         return;

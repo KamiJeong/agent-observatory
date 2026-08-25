@@ -44,6 +44,7 @@ export class RealCodexAdapter implements CodexAdapter {
   #pending = new Map<string | number, PendingCall>();
   #nextId = 1;
   #connected = false;
+  #connectPromise?: Promise<void>;
   #closing = false;
   #reconnectTimer?: ReturnType<typeof setTimeout>;
   #attempt = 0;
@@ -64,7 +65,15 @@ export class RealCodexAdapter implements CodexAdapter {
 
   async connect(): Promise<void> {
     this.#closing = false;
-    await this.#open();
+    if (this.#connected) return;
+    if (this.#connectPromise) return this.#connectPromise;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    const pending = this.#open().finally(() => {
+      if (this.#connectPromise === pending) this.#connectPromise = undefined;
+    });
+    this.#connectPromise = pending;
+    await pending;
   }
 
   async disconnect(): Promise<void> {
@@ -302,7 +311,7 @@ export class RealCodexAdapter implements CodexAdapter {
       },
     });
     this.#reconnectTimer = setTimeout(() => {
-      void this.#open().catch((error) => {
+      void this.connect().catch((error) => {
         this.#debug("connection", "Reconnect failed", error);
       });
     }, delay);
