@@ -77,7 +77,9 @@ bunx agent-observatory --scenario stress --no-open
 
 The preferred default address is <http://127.0.0.1:4317>. If that port is
 already in use, the CLI selects the next available port and prints the final
-bootstrap URL. An explicitly supplied `--port` never falls back silently.
+bootstrap URL. The API and bundled Web UI use that same selected origin, so no
+proxy reconfiguration is required. An explicitly supplied `--port` never falls
+back silently. On WSL, the CLI opens the URL through the Windows browser bridge.
 Run `bunx agent-observatory --help` to see all options.
 
 ### Package registry

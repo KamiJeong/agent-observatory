@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { resolveRuntimeConfiguration, selectAvailablePort } from "../../../bin/cli-runtime.js";
+import { browserCommand, resolveRuntimeConfiguration, selectAvailablePort } from "../../../bin/cli-runtime.js";
 
 const cliPath = fileURLToPath(new URL("../../../bin/agent-observatory.js", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -54,6 +54,67 @@ describe("agent-observatory CLI", () => {
     } finally {
       await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
     }
+  });
+
+  it("uses the selected fallback port for both the API and web bootstrap", async () => {
+    const occupied = createServer((_request, response) => response.end("occupied"));
+    await new Promise<void>((resolve, reject) => {
+      occupied.once("error", reject);
+      occupied.listen(0, "127.0.0.1", resolve);
+    });
+    const address = occupied.address();
+    const occupiedPort = typeof address === "object" && address ? address.port : 0;
+    const child = spawn(process.execPath, [cliPath, "--mock", "--no-open"], {
+      cwd: repositoryRoot,
+      env: { ...process.env, OBSERVATORY_PORT: String(occupiedPort) },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    try {
+      await waitUntil(() => /Agent Observatory server: http:\/\/127\.0\.0\.1:\d+\/\?token=/.test(stdout));
+      const bootstrapUrl = stdout.match(/Agent Observatory server: (http:\/\/[^\s]+)/)?.[1];
+      expect(bootstrapUrl).toBeTruthy();
+      const parsed = new URL(bootstrapUrl ?? "http://127.0.0.1");
+      expect(Number(parsed.port)).not.toBe(occupiedPort);
+      expect(stderr).toContain(`Port ${occupiedPort} is already in use; using ${parsed.port} instead.`);
+
+      const bootstrap = await fetch(parsed, { redirect: "manual" });
+      const sessionCookie = bootstrap.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+      const origin = parsed.origin;
+      const [web, snapshot] = await Promise.all([
+        fetch(origin, { headers: { cookie: sessionCookie } }),
+        fetch(`${origin}/api/snapshot`, { headers: { cookie: sessionCookie } }),
+      ]);
+      expect(web.status).toBe(200);
+      expect(await web.text()).toContain("Agent Observatory");
+      expect(snapshot.status).toBe(200);
+      expect((await snapshot.json()).runtime.adapter).toBe("mock");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGTERM");
+        await exited;
+      }
+      await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
+    }
+  }, 10_000);
+
+  it("opens WSL URLs with the Windows browser bridge", () => {
+    const target = "http://127.0.0.1:4318/?token=test";
+    expect(browserCommand("linux", { WSL_INTEROP: "/run/WSL/interop" }, target)).toEqual({
+      file: "cmd.exe",
+      args: ["/c", "start", "", target],
+    });
+    expect(browserCommand("linux", {}, target)).toEqual({ file: "xdg-open", args: [target] });
+    expect(browserCommand("darwin", {}, target)).toEqual({ file: "open", args: [target] });
   });
 
   it("starts the combined Codex and Claude runtime by default", async () => {
