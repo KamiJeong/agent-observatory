@@ -1,16 +1,16 @@
-# Codex Agent Observatory
+# Agent Observatory
 
 [English](README.md) | [한국어](README.ko.md)
 
-Codex Agent Observatory는 Codex 루트 에이전트와 서브에이전트의 관계, 실행 상태,
+Agent Observatory는 Codex와 Claude Code 루트 에이전트 및 서브에이전트의 관계, 실행 상태,
 현재 활동, 승인 또는 사용자 입력 대기, 최근 도구·파일·명령 활동을 한 화면에서 보는
 로컬 에이전트 관측성 대시보드입니다.
 
-로그를 그대로 출력하는 뷰어가 아니라 Codex App Server 프로토콜을 Observatory
-도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 크기가 제한된 활동 타임라인으로
-투영합니다.
+로그를 그대로 출력하는 뷰어가 아니라 provider 프로토콜과 로컬 호환성 근거를
+Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 크기가 제한된 활동
+타임라인으로 투영합니다.
 
-여러 Codex 에이전트가 병렬로 일할 때 다음 질문에 빠르게 답하는 것이 목표입니다.
+여러 에이전트가 병렬로 일할 때 다음 질문에 빠르게 답하는 것이 목표입니다.
 
 - 지금 누가 작업 중인가?
 - 어떤 에이전트가 사용자 입력이나 승인을 기다리는가?
@@ -21,27 +21,45 @@ Codex Agent Observatory는 Codex 루트 에이전트와 서브에이전트의 �
 
 ![Status](https://img.shields.io/badge/status-MVP-3b82f6)
 ![Codex](https://img.shields.io/badge/Codex-0.149.0-64748b)
+![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.241-d97757)
+[![npm version](https://img.shields.io/npm/v/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
+[![npm downloads](https://img.shields.io/npm/dm/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
 
 ## 데모
 
-![여러 에이전트가 동시에 실행 중인 Codex Agent Observatory](docs/assets/agent-observatory-demo.gif)
+![Codex와 Claude 에이전트를 한 화면에 표시하는 Agent Observatory](docs/assets/agent-observatory-demo.png)
+
+<details>
+<summary>Provider 필터, 관계 보기, Inspector, Workflow Board 동작 보기</summary>
+
+![Agent Observatory multi-provider 인터랙션 데모](docs/assets/agent-observatory-demo.gif)
+
+</details>
+
+데모에는 로컬 세션 데이터 대신 결정론적이고 내용이 안전한 fixture를 사용합니다.
+`bunx agent-observatory --scenario demo`로 동일한 화면을 실행할 수 있습니다.
 
 ## 빠른 시작
 
 ### bunx로 바로 실행
 
-npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 Codex가 없어도
-동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
+npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 두 provider CLI가
+없어도 동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
 
 ```bash
 bunx agent-observatory
 ```
 
-현재 머신에서 실행 중인 Codex 에이전트를 관측하려면 Real Mode를 사용합니다.
+현재 머신에서 실행 중인 Codex, Claude Code 또는 둘 다 관측하려면 Real Mode를 사용합니다.
 
 ```bash
 bunx agent-observatory --real
+bunx agent-observatory --real --provider claude
+bunx agent-observatory --real --provider all
 ```
+
+기존 동작과의 호환성을 위해 `--real`은 기본적으로 Codex를 선택합니다. 두 런타임을
+함께 보려면 `--provider all`을 사용합니다.
 
 특정 작업 디렉터리만 보거나 브라우저를 자동으로 열지 않을 수도 있습니다.
 
@@ -52,6 +70,14 @@ bunx agent-observatory --scenario stress --no-open
 
 기본 주소는 <http://127.0.0.1:4317>입니다. 모든 옵션은
 `bunx agent-observatory --help`로 확인할 수 있습니다.
+
+### 패키지 레지스트리
+
+공식 공개 패키지는 npmjs.org의
+[`agent-observatory`](https://www.npmjs.com/package/agent-observatory)입니다.
+이 저장소는 GitHub Packages에 별도의 scoped 패키지를 중복 배포하지 않으므로,
+GitHub 저장소 사이드바의 **Packages** 영역이 비어 있어도 정상입니다. 릴리스
+워크플로가 GitHub Release와 npm 버전을 동일하게 유지합니다.
 
 ### 저장소를 복제해서 개발
 
@@ -67,18 +93,20 @@ bun install
 bun run dev
 ```
 
-백엔드가 출력하는 `Codex Agent Observatory server` bootstrap URL을 여세요.
+백엔드가 출력하는 `Agent Observatory server` bootstrap URL을 여세요.
 서버가 HttpOnly 로컬 세션 쿠키를 설정한 뒤 인증정보가 남지 않은
 <http://127.0.0.1:4318>로 리다이렉트합니다.
 
-#### 2. 현재 실행 중인 Codex 관측
+#### 2. 현재 실행 중인 에이전트 관측
 
-Codex CLI가 설치되어 있고 로컬에서 에이전트 워크플로가 실행 중이라면 Real Mode를
-사용합니다.
+선택한 provider CLI 중 하나 이상이 설치되어 있고 로컬에서 에이전트 워크플로가
+실행 중이라면 Real Mode를 사용합니다.
 
 ```bash
 codex --version
+claude --version
 bun run dev:real
+bun run dev:real -- --provider codex,claude
 ```
 
 개발 실행기는 가능한 경우 인증된 대시보드를 자동으로 엽니다. 자동 실행되지 않으면
@@ -96,7 +124,8 @@ bun run dev:real -- --cwd /absolute/path/to/project
 ## 화면 구성
 
 - **Agents**: 부모/자식 트리, 상태, 역할, 모델/추론 강도, 스킬/워크플로 근거
-- **Agent Graph**: 루트와 서브에이전트 토폴로지, 이동/확대·축소/맞춤, 노드 선택
+- **Provider 상태 및 필터**: Codex/Claude 독립 상태와 provider, workspace, session, status, 검색 필터
+- **Agent Graph**: 생성 토폴로지와 근거가 표시된 task, handoff, message 관계
 - **Workflow Board**: 관측된 워크플로별 에이전트 레인과 Started/Status/Updated 정렬
 - **Run History**: 요청, 결정, 인계, 전달, 완료를 Agent lane으로 보여 주는 인간 중심 히스토리
 - **Trace**: 도구, 명령, 파일, 테스트, 오류 필터를 제공하는 저수준 가상화 타임라인
@@ -104,27 +133,27 @@ bun run dev:real -- --cwd /absolute/path/to/project
 - **Debug**: 프로토콜 이벤트, 정규화된 이벤트, 연결/버전 진단
 
 Workflow Board의 `Observed order`는 에이전트 시작 시각이나 업데이트 시각으로 계산한
-관측 순서입니다. Codex가 선언한 워크플로 단계 또는 오케스트레이션 소유권으로
+관측 순서입니다. Provider가 선언한 워크플로 단계 또는 오케스트레이션 소유권으로
 간주하지 않습니다. 근거가 없으면 추측하지 않고 `No workflow evidence`로 표시합니다.
 
 ## 아키텍처
 
 ```text
-Codex App Server (JSONL over stdio)
-             │
-             ▼
-      RealCodexAdapter ───── MockCodexAdapter
-             │                       │
-             └──── normalized events ┘
-                         │
-                         ▼
-                Agent state projector
-                         │
-                         ▼
-              Local HTTP/WebSocket server
-                         │
-                         ▼
-                  React dashboard
+Codex protocol/state ── RealCodexAdapter ─┐
+                                         │
+Claude transcripts ── ClaudeCodeAdapter ─┼─ CompositeRuntimeAdapter
+                                         │             │
+Mock scenario ──────── MockCodexAdapter ─┘             ▼
+                                              normalized events
+                                                      │
+                                                      ▼
+                                             Agent state projector
+                                                      │
+                                                      ▼
+                                           Local HTTP/WebSocket server
+                                                      │
+                                                      ▼
+                                                React dashboard
 ```
 
 ```text
@@ -139,32 +168,40 @@ generated/
   codex*/                 Codex 0.149.0에서 생성한 TS 및 JSON Schema
 docs/
   architecture.md         모듈 경계와 의존성 규칙
+  accessibility.md        WCAG 측정값과 릴리스 검증 체크리스트
   codex-protocol.md       1단계 프로토콜 조사 결과 및 매핑 결정
 ```
 
 서버와 대시보드의 모듈 책임, 의존 방향, 확장 지점은
 [아키텍처 경계](docs/architecture.md)에서 확인할 수 있습니다.
+[접근성 검증 가이드](docs/accessibility.md)에는 명암비 측정값, 자동화 범위,
+수동 릴리스 체크리스트가 정리되어 있습니다.
 
-React 컴포넌트는 원시 Codex JSON을 직접 사용하지 않습니다. 알려진 엔벌로프는
+React 컴포넌트는 원시 provider 레코드를 직접 사용하지 않습니다. 알려진 엔벌로프는
 관대하게 정규화하고, 추가 필드를 허용하며, 잘못된 이벤트는 크기가 제한된 디버그
 버퍼로 보내고, 알 수 없는 메서드 때문에 대시보드가 중단되지 않게 합니다.
 
 ## 기능
 
 - 네이티브 근거 기반 상태를 표시하는 접이식 부모/자식 에이전트 목록
+- 장애가 격리된 하나의 composite runtime에서 Codex와 Claude 동시 표시
+- Provider 상태 및 provider/session/workspace/status/검색 필터
+- 설정, 빈 상태, 권한, 미지원 버전, 부분 장애에 대한 복구 안내
 - 시맨틱 HTML 노드와 SVG 연결선으로 구성한 루트/서브에이전트 트리
+- 근거 출처가 표시되는 spawn, task, handoff, message 관계
 - 그래프 이동, 확대·축소, 맞춤, 키보드 선택, 활성 선택 강조
 - 에이전트 목록, 그래프 노드, Inspector에 관측된 모델과 추론 강도 표시
 - 에이전트 필터 및 노드별 마커가 있는 관측된 스킬/워크플로 문맥
 - 관측 순서/상태/업데이트 정렬을 지원하는 근거 기반 Workflow Board
-- 송신자, 수신자, 메시지 내용, 완료 상태를 명시하는 Human/Agent 실행 히스토리
+- 송신자, 수신자, 완료 상태를 명시하는 Human/Agent 실행 히스토리. 내용은 fixture 또는 명시적 opt-in에서만 제한적으로 표시
 - Git 스타일 Agent lane을 사용하는 Story, Messages, 저수준 Trace 보기
 - 가상화된 최근 활동, 스레드, 작업 디렉터리, 선택적 토큰 사용량을 제공하는 Inspector
 - 필터와 300개 이벤트 메모리 제한이 있는 가상화 활동 타임라인
 - 명시적인 승인 및 사용자 입력 대기 사유
+- Claude Agent Teams beta 역할, task 조정, peer message, shutdown 근거
 - 연결 상태 및 지터가 적용된 지수 백오프 재연결
 - 선택적으로 사용할 수 있는 크기 제한 프로토콜 디버그 패널
-- Mock 시나리오 A, B 및 35개 에이전트 스트레스 모드
+- Mock 시나리오 A, B, demo 및 35개 에이전트 스트레스 모드
 - 에이전트 목록 → 그래프 → 활동 순서의 반응형 재배치
 
 상태를 추측하지 않습니다.
@@ -182,11 +219,13 @@ collab completed       → COMPLETED
 
 ## 플랫폼 지원
 
-| 플랫폼 | Real Mode 탐색 방식 | 상태 |
-| --- | --- | --- |
-| Linux / WSL2 | `/proc`에서 대화형 프로세스의 cwd를 읽음 | 지원됨, WSL2 Linux에서 로컬 검증 |
-| macOS | `ps`로 Codex 프로세스를 찾고 `lsof`로 cwd를 확인 | 구현됨, 네이티브 기기 검증 예정 |
-| Windows | PowerShell CIM으로 Codex 프로세스를 찾고 `-C`/`--cd`가 있으면 사용, 없으면 Codex 상태에서 가장 최근 루트를 선택 | 구현됨, 네이티브 기기 검증 예정 |
+| Provider | 플랫폼 | Real Mode 탐색 방식 | 상태 |
+| --- | --- | --- | --- |
+| Codex | Linux / WSL2 | `/proc`에서 대화형 프로세스의 cwd를 읽음 | 지원됨, WSL2 Linux에서 로컬 검증 |
+| Codex | macOS | `ps`로 프로세스를 찾고 `lsof`로 cwd를 확인 | 구현됨, 네이티브 기기 검증 예정 |
+| Codex | Windows | PowerShell CIM 사용, `-C`/`--cd`가 없으면 최근 Codex 상태 선택 | 구현됨, 네이티브 기기 검증 예정 |
+| Claude | Linux / WSL2 | procfs cwd와 제한된 transcript 및 Agent Teams 호환성 근거 사용 | 지원됨, WSL2 Linux에서 로컬 검증 |
+| Claude | macOS / Windows | 정확한 live process mapping 없이 transcript-only 기록 탐색 | 호환성 fallback, 네이티브 기기 검증 예정 |
 
 Codex와 Observatory는 같은 OS 환경에서 실행되고 동일한 `CODEX_HOME`을 사용해야
 합니다. 예를 들어 네이티브 Windows에서 실행한 Observatory는 WSL 안에서 실행 중인
@@ -209,10 +248,12 @@ bun run dev:real -- --cwd C:\projects\my-app
 - Node.js 22.13 이상 (`node:sqlite` 필요)
 - Bun 1.3.14
 - Real Mode용 Codex CLI 0.149.x
+- 현재 검증된 Claude 호환 어댑터용 Claude Code 2.1.241
 - macOS: 시스템 `ps`, `lsof` 명령
 - Windows: CIM을 사용할 수 있는 Windows PowerShell
 
-Mock Mode에는 Codex CLI가 필요하지 않습니다.
+Mock Mode에는 두 CLI 모두 필요하지 않습니다. Real Mode에는 `--provider`로 선택한
+런타임만 설치되어 있으면 됩니다.
 
 ## 개발
 
@@ -223,6 +264,7 @@ bun run typecheck
 bun run test
 bun run test:e2e
 bun run build
+bun run demo:capture # 안전한 README PNG/GIF 재생성, ffmpeg 필요
 ```
 
 기여 작업은 단기 브랜치와 `main` 대상 Pull Request를 사용합니다. 브랜치, 리뷰,
@@ -253,11 +295,13 @@ Main ●
 
 ```bash
 OBSERVATORY_SCENARIO=b bun run dev
+OBSERVATORY_SCENARIO=demo bun run dev
 OBSERVATORY_SCENARIO=stress bun run dev
 ```
 
 - `a`: 생성, 활동, 완료, 승인 대기, 복구
 - `b`: 중첩된 프런트엔드/테스트 에이전트, 완료된 백엔드, 실패한 리뷰어
+- `demo`: 결정론적 Codex + Claude provider, 관계, 필터, workflow 데모
 - `stress`: 결정론적 상태/활동 업데이트가 계속되는 35개 에이전트
 
 ## Real Codex Mode
@@ -279,12 +323,14 @@ bun run dev:real
 
 | 변수 | 기본값 | 용도 |
 | --- | --- | --- |
-| `OBSERVATORY_ADAPTER` | `mock` | Real Mode에서는 `codex`로 설정 |
+| `OBSERVATORY_ADAPTER` | `mock` | Provider 기반 Real Mode에서는 `real`로 설정 |
+| `OBSERVATORY_PROVIDERS` | `codex` | 관측할 provider 목록: `codex`, `claude` 또는 `codex,claude` |
 | `OBSERVATORY_PORT` | `4317` | 백엔드 HTTP/WebSocket 포트 |
 | `OBSERVATORY_CWD` | 공유 모드에서 `all` | 정확한 작업 디렉터리 필터. 비활성화하려면 `all` 사용 |
 | `OBSERVATORY_ROOT_THREAD_ID` | 미설정 | 루트 하나와 그 자손만 포함 |
 | `OBSERVATORY_CODEX_TRANSPORT` | `shared` | `shared`, `standalone` 또는 실험적 `proxy` |
-| `OBSERVATORY_SCENARIO` | `a` | Mock 픽스처: `a`, `b` 또는 `stress` |
+| `OBSERVATORY_SCENARIO` | `a` | Mock 픽스처: `a`, `b`, `demo` 또는 `stress` |
+| `OBSERVATORY_CAPTURE_CONTENT` | 미설정 | 기본 metadata-only. 로컬 브라우저에서 제한된 provider 내용을 보려면 `1`로 설정 |
 
 예시:
 
@@ -336,6 +382,16 @@ codex-cli 0.149.0
 필드 추가를 허용하는 방식으로 파싱하므로 다른 Codex 버전도 동작할 수 있지만,
 바인딩을 다시 생성하고 테스트를 통과하기 전까지 공식 지원한다고 간주하지 않습니다.
 
+## Real Claude Code Mode
+
+Claude 관측은 버전을 인식하는 읽기 전용 호환성 어댑터입니다. Linux에서는 활성 작업
+디렉터리를 찾고, 크기가 제한된 root/subagent transcript tail과 Agent Teams beta의
+config, task, mailbox 메타데이터를 읽습니다. Prompt, response, thinking, command,
+tool input, task 내용, mailbox 본문은 보관하지 않습니다. 다른 플랫폼은 현재
+transcript-only 기록 탐색을 사용합니다. 공식 hook과 OpenTelemetry는 향후 정확도
+향상 항목입니다. 근거, 개인정보, 버전 경계는
+[Claude 호환성 문서](docs/claude-compatibility.md)를 참고하세요.
+
 ## 프로토콜 생성
 
 설치된 Codex 버전을 변경한 후 다음을 실행합니다.
@@ -369,7 +425,7 @@ codex app-server generate-json-schema --out ./generated/codex-schema-experimenta
 ## 테스트
 
 ```bash
-bun run test         # 단위, 통합, CLI, UI 테스트 40개
+bun run test         # 단위, 통합, CLI, UI 테스트 스위트
 bun run test:e2e     # Chromium Mock 생명주기
 bun run build        # 타입 검사 + 프로덕션 프런트엔드 빌드
 ```
@@ -410,7 +466,7 @@ Server 프로세스 종료를 별도로 재시도합니다. 연결과 프로토�
 확인할 수 있으며, 원시 스택 트레이스는 기본 UI에 노출되지 않습니다.
 
 대시보드에 인증이 필요하다는 메시지가 표시되면 Vite 포트를 직접 열지 마세요.
-Observatory를 다시 시작하고 가장 최근에 출력된 `Codex Agent Observatory server`
+Observatory를 다시 시작하고 가장 최근에 출력된 `Agent Observatory server`
 또는 `Dashboard bootstrap` URL을 사용하세요. 이전 서버 프로세스의 세션은 재시작 후
 의도적으로 무효화됩니다.
 

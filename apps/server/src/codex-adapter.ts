@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type {
-  CodexAdapter,
-  CodexRuntimeEvent,
+  AgentRuntimeAdapter,
+  AgentRuntimeEvent,
   DiscoveryOptions,
   ReadThreadOptions,
   RuntimeInfo,
@@ -37,9 +37,10 @@ function messageFromError(value: unknown): string {
   return "Unknown App Server error";
 }
 
-export class RealCodexAdapter implements CodexAdapter {
+export class RealCodexAdapter implements AgentRuntimeAdapter {
+  readonly provider = "codex" as const;
   readonly mode = "codex" as const;
-  #listeners = new Set<(event: CodexRuntimeEvent) => void>();
+  #listeners = new Set<(event: AgentRuntimeEvent) => void>();
   #child?: ChildProcessWithoutNullStreams;
   #pending = new Map<string | number, PendingCall>();
   #nextId = 1;
@@ -55,6 +56,7 @@ export class RealCodexAdapter implements CodexAdapter {
   runtimeInfo(): RuntimeInfo {
     return {
       adapter: "codex",
+      provider: this.provider,
       observatoryVersion: "0.1.0",
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
@@ -95,7 +97,7 @@ export class RealCodexAdapter implements CodexAdapter {
     });
   }
 
-  subscribe(listener: (event: CodexRuntimeEvent) => void): () => void {
+  subscribe(listener: (event: AgentRuntimeEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
@@ -317,8 +319,9 @@ export class RealCodexAdapter implements CodexAdapter {
     }, delay);
   }
 
-  #emit(event: CodexRuntimeEvent): void {
-    for (const listener of this.#listeners) listener(event);
+  #emit(event: AgentRuntimeEvent): void {
+    const tagged = { ...event, provider: event.provider ?? this.provider } as AgentRuntimeEvent;
+    for (const listener of this.#listeners) listener(tagged);
   }
 
   #debug(

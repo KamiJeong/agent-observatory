@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type * as React from "react";
 import type { ActivityKind, AgentActivity, AgentNode, ObservatorySnapshot } from "@observatory/core";
-import { formatDuration, formatTime, shortId, StatusBadge, type TimelineFilter } from "../shared/presentation.tsx";
+import { agentProvider, formatDuration, formatTime, ProviderBadge, shortId, StatusBadge, type TimelineFilter } from "../shared/presentation.tsx";
 import { RunHistory, type RunHistoryMode } from "./RunHistory.tsx";
 
 function filterKinds(filter: TimelineFilter, kind: ActivityKind): boolean {
@@ -104,7 +104,10 @@ export function ActivityTimeline({ snapshot }: { snapshot: ObservatorySnapshot }
               <time dateTime={new Date(activity.startedAt).toISOString()}>{formatTime(activity.startedAt)}</time>
               <span className="timeline-item__rail" aria-hidden="true" />
               <div>
-                <span className="timeline-item__agent">{agent?.nickname ?? agent?.role ?? shortId(activity.agentId)}</span>
+                <span className="timeline-item__agent">
+                  {agent && <ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} compact />}
+                  {agent?.nickname ?? agent?.role ?? shortId(activity.agentId)}
+                </span>
                 <strong>{activity.title}</strong>
                 {activity.detail && <p>{activity.detail}</p>}
               </div>
@@ -216,6 +219,14 @@ function Inspector({ agent, snapshot, now }: { agent: AgentNode; snapshot: Obser
         <StatusBadge agent={agent} />
       </div>
       <dl className="details">
+        <DetailRow label="Provider"><ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} /></DetailRow>
+        {(agent.evidenceSources?.length ?? 0) > 0 && (
+          <DetailRow label="Evidence">
+            <span className="context-tags">
+              {agent.evidenceSources?.map((source) => <span key={source}>{source}</span>)}
+            </span>
+          </DetailRow>
+        )}
         <DetailRow label="Runtime">{formatDuration(now - (agent.startedAt ?? snapshot.startedAt))}</DetailRow>
         <DetailRow label="Current activity">{current?.title ?? "—"}</DetailRow>
         {agent.model && <DetailRow label="Model">{agent.model}</DetailRow>}

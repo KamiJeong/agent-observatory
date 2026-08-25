@@ -85,6 +85,12 @@ and fix pull requests have reached `main`.
    version with npm Trusted Publishing, and creates a matching GitHub Release and
    `vX.Y.Z` tag.
 
+The canonical registry is npmjs.org. This repository intentionally does not
+dual-publish a scoped copy to GitHub Packages, so the repository's empty
+**Packages** sidebar section is expected. Adding a second registry requires a
+separate proposal covering the user need, scoped package name, authentication,
+version synchronization, and support ownership.
+
 The publish job uses the protected `npm` GitHub environment. Configure the npm
 package's trusted publisher with repository `KamiJeong/agent-observatory`,
 workflow `publish.yml`, and environment `npm`. The workflow intentionally skips
@@ -92,3 +98,5 @@ an already-published version, so reruns are safe.
 
 Version numbers must never be reused. If publication fails after a version is
 reserved, create a new patch version instead of replacing the published package.
+Before completing a release, verify that the npm version, GitHub Release title,
+and `vX.Y.Z` tag all match the version in `package.json`.

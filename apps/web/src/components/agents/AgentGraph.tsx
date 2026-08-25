@@ -10,16 +10,33 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type * as React from "react";
-import type { AgentNode, ObservatorySnapshot } from "@observatory/core";
+import type { AgentGraphEdge, AgentNode, AgentRelationKind, ObservatorySnapshot } from "@observatory/core";
 import { GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH, layoutGraph } from "../../lib/graph-layout.ts";
 import {
   agentRuntimeLabel,
+  agentProvider,
+  ProviderBadge,
   roleColor,
   roleDescription,
   shortId,
   STATUS,
   StatusBadge,
 } from "../shared/presentation.tsx";
+
+const RELATION_LABEL: Record<AgentRelationKind, string> = {
+  spawn: "Spawned",
+  task: "Assigned task",
+  handoff: "Handed off",
+  message: "Sent message",
+};
+
+function relationDescription(edge: AgentGraphEdge, snapshot: ObservatorySnapshot): string {
+  const source = snapshot.agents[edge.source];
+  const target = snapshot.agents[edge.target];
+  const sourceLabel = source?.nickname ?? source?.role ?? shortId(edge.source);
+  const targetLabel = target?.nickname ?? target?.role ?? shortId(edge.target);
+  return `${sourceLabel} ${RELATION_LABEL[edge.kind].toLowerCase()} ${targetLabel}. Evidence: ${edge.evidenceSource}.${edge.label ? ` ${edge.label}.` : ""}`;
+}
 
 export const AgentGraph = memo(function AgentGraph({
   snapshot,
@@ -30,7 +47,10 @@ export const AgentGraph = memo(function AgentGraph({
   selectedId?: string;
   onSelect(id: string): void;
 }) {
-  const topologyKey = snapshot.roots.join("|") + snapshot.edges.map((edge) => `${edge.source}>${edge.target}`).join("|");
+  const topologyKey = snapshot.roots.join("|") + snapshot.edges
+    .filter((edge) => edge.kind === "spawn")
+    .map((edge) => `${edge.source}>${edge.target}`)
+    .join("|");
   const layout = useMemo(() => layoutGraph(snapshot), [topologyKey]);
   const activitiesById = useMemo(
     () => new Map(snapshot.activities.map((activity) => [activity.id, activity])),
@@ -40,14 +60,22 @@ export const AgentGraph = memo(function AgentGraph({
   const canvasRef = useRef<HTMLDivElement>(null);
   const view = useRef({ scale: 1, x: 0, y: 0 });
   const [scalePercent, setScalePercent] = useState(100);
+  const [showAllRelations, setShowAllRelations] = useState(false);
   const scalePercentRef = useRef(100);
   const [roleTooltip, setRoleTooltip] = useState<{
+    agentId: string;
     role: string;
     description: string;
     x: number;
     y: number;
   }>();
   const drag = useRef<{ pointerId: number; x: number; y: number; originX: number; originY: number } | undefined>(undefined);
+  const spawnEdges = snapshot.edges.filter((edge) => edge.kind === "spawn");
+  const secondaryEdges = snapshot.edges.filter((edge) => edge.kind !== "spawn");
+  const visibleSecondaryEdges = secondaryEdges.filter((edge) => (
+    showAllRelations || (selectedId !== undefined && (edge.source === selectedId || edge.target === selectedId))
+  ));
+  const visibleEdges = [...spawnEdges, ...visibleSecondaryEdges];
 
   const applyView = useCallback((next: { scale: number; x: number; y: number }) => {
     const normalized = {
@@ -183,6 +211,7 @@ export const AgentGraph = memo(function AgentGraph({
       ? below
       : Math.max(12, roleBounds.top - viewportBounds.top - height - 8);
     setRoleTooltip({
+      agentId: agent.id,
       role: agent.role ?? "agent",
       description: roleDescription(agent.role),
       x,
@@ -211,6 +240,19 @@ export const AgentGraph = memo(function AgentGraph({
           <span className="panel__subtle">Session topology · live</span>
         </div>
         <div className="graph-controls" aria-label="Graph controls">
+          {secondaryEdges.length > 0 && (
+            <button
+              className="graph-controls__relations"
+              data-active={showAllRelations || undefined}
+              aria-pressed={showAllRelations}
+              aria-label={showAllRelations
+                ? `Show selected relations only; ${secondaryEdges.length} secondary relations available`
+                : `Show all ${secondaryEdges.length} secondary relations`}
+              onClick={() => setShowAllRelations((visible) => !visible)}
+            >
+              Relations {secondaryEdges.length}
+            </button>
+          )}
           <button onClick={() => zoomAt(0.85)} aria-label="Zoom out">−</button>
           <span className="graph-controls__scale" aria-label={`Zoom ${scalePercent}%`}>{scalePercent}%</span>
           <button onClick={() => zoomAt(1.15)} aria-label="Zoom in">+</button>
@@ -238,23 +280,37 @@ export const AgentGraph = memo(function AgentGraph({
           }}
         >
           <svg className="graph__edges" width={layout.width} height={layout.height} aria-hidden="true">
-            {snapshot.edges.map((edge) => {
+            <defs>
+              <marker id="relation-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto" markerUnits="strokeWidth">
+                <path d="M 0 0 L 7 3.5 L 0 7 z" />
+              </marker>
+            </defs>
+            {visibleEdges.map((edge, edgeIndex) => {
               const source = layout.positions[edge.source];
               const target = layout.positions[edge.target];
               if (!source || !target) return null;
               const x1 = source.x + GRAPH_NODE_WIDTH / 2;
-              const y1 = source.y + GRAPH_NODE_HEIGHT;
+              const y1 = edge.kind === "spawn" ? source.y + GRAPH_NODE_HEIGHT : source.y + GRAPH_NODE_HEIGHT / 2;
               const x2 = target.x + GRAPH_NODE_WIDTH / 2;
-              const y2 = target.y;
+              const y2 = edge.kind === "spawn" ? target.y : target.y + GRAPH_NODE_HEIGHT / 2;
               const branchY = y1 + 18;
               const approachY = y2 - 18;
               const gutterX = target.x - 16;
+              const curve = 42 + (edgeIndex % 3) * 18;
+              const direction = x1 <= x2 ? 1 : -1;
+              const path = edge.kind === "spawn"
+                ? `M ${x1} ${y1} V ${branchY} H ${gutterX} V ${approachY} H ${x2} V ${y2}`
+                : edge.source === edge.target
+                  ? `M ${x1 + 42} ${y1 - 52} C ${x1 + 132} ${y1 - 104}, ${x1 + 132} ${y1 + 104}, ${x1 + 42} ${y1 + 52}`
+                  : `M ${x1 + direction * 42} ${y1} C ${x1 + direction * curve} ${y1 - curve}, ${x2 - direction * curve} ${y2 - curve}, ${x2 - direction * 42} ${y2}`;
               const active = edge.target === selectedId || edge.source === selectedId;
               return (
                 <path
                   key={edge.id}
-                  d={`M ${x1} ${y1} V ${branchY} H ${gutterX} V ${approachY} H ${x2} V ${y2}`}
+                  d={path}
+                  data-kind={edge.kind}
                   data-active={active || undefined}
+                  markerEnd={edge.kind === "spawn" ? undefined : "url(#relation-arrow)"}
                   style={active ? {
                     "--edge-active-color": roleColor(snapshot.agents[selectedId ?? ""]?.role),
                   } as CSSProperties : undefined}
@@ -278,17 +334,25 @@ export const AgentGraph = memo(function AgentGraph({
                 } as CSSProperties}
                 key={agent.id}
                 onClick={() => onSelect(agent.id)}
+                onFocus={(event) => {
+                  const roleElement = event.currentTarget.querySelector<HTMLElement>(".agent-node__role");
+                  if (roleElement) showRoleTooltip(roleElement, agent);
+                }}
                 onBlur={() => setRoleTooltip(undefined)}
-                aria-label={`${agent.nickname ?? agent.role ?? agent.id}, ${STATUS[agent.status].label}. Role ${agent.role ?? "agent"}: ${roleDescription(agent.role)}${agent.children.length > 0 ? ` Parent of ${agent.children.length} agents.` : ""}`}
+                aria-label={`${agent.nickname ?? agent.role ?? agent.id}, ${STATUS[agent.status].label}. Provider ${agentProvider(agent, snapshot.runtime.adapter)}. Role ${agent.role ?? "agent"}: ${roleDescription(agent.role)}${agent.children.length > 0 ? ` Parent of ${agent.children.length} agents.` : ""}`}
                 aria-pressed={selectedId === agent.id}
+                aria-describedby={roleTooltip?.agentId === agent.id ? `role-tooltip-${agent.id}` : undefined}
               >
                 <span className="agent-node__topline">
-                  <span
-                    className="agent-node__role"
-                    onMouseEnter={(event: ReactMouseEvent<HTMLSpanElement>) => showRoleTooltip(event.currentTarget, agent)}
-                    onMouseLeave={() => setRoleTooltip(undefined)}
-                  >
-                    {agent.role ?? "agent"}
+                  <span className="agent-node__identity">
+                    <ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} />
+                    <span
+                      className="agent-node__role"
+                      onMouseEnter={(event: ReactMouseEvent<HTMLSpanElement>) => showRoleTooltip(event.currentTarget, agent)}
+                      onMouseLeave={() => setRoleTooltip(undefined)}
+                    >
+                      {agent.role ?? "agent"}
+                    </span>
                   </span>
                   <span className="agent-node__signals">
                     {(agent.observedSkills?.length ?? 0) > 0 && <span title={`${agent.observedSkills?.length} observed skill(s)`}>S{agent.observedSkills?.length}</span>}
@@ -322,8 +386,32 @@ export const AgentGraph = memo(function AgentGraph({
         {Object.keys(snapshot.agents).length > 0 && (
           <div className="graph__hint" aria-hidden="true">Drag or scroll to move · Pinch or Ctrl-scroll to zoom</div>
         )}
+        {visibleSecondaryEdges.length > 0 && (
+          <aside className="graph-relations" aria-label="Visible agent relations">
+            <strong>{showAllRelations ? "All secondary relations" : "Selected agent relations"}</strong>
+            <ul>
+              {visibleSecondaryEdges.slice(0, 8).map((edge) => {
+                const otherId = edge.source === selectedId ? edge.target : edge.source;
+                return (
+                  <li key={edge.id}>
+                    <button onClick={() => onSelect(otherId)} aria-label={`${relationDescription(edge, snapshot)} Select related agent.`}>
+                      <span data-kind={edge.kind}>{RELATION_LABEL[edge.kind]}</span>
+                      <small>{snapshot.agents[edge.source]?.nickname ?? shortId(edge.source)} → {snapshot.agents[edge.target]?.nickname ?? shortId(edge.target)}</small>
+                      <em>{edge.evidenceSource}</em>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            {visibleSecondaryEdges.length > 8 && <small>+{visibleSecondaryEdges.length - 8} more relations</small>}
+          </aside>
+        )}
+        <ul className="sr-only" aria-label="Agent relation descriptions">
+          {visibleEdges.map((edge) => <li key={edge.id}>{relationDescription(edge, snapshot)}</li>)}
+        </ul>
         {roleTooltip && (
           <div
+            id={`role-tooltip-${roleTooltip.agentId}`}
             className="role-tooltip"
             role="tooltip"
             style={{ left: `${roleTooltip.x}px`, top: `${roleTooltip.y}px` }}

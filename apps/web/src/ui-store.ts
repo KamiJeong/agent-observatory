@@ -8,6 +8,7 @@ const emptySnapshot: ObservatorySnapshot = {
   history: [],
   pendingRequests: {},
   connection: { phase: "connecting", attempt: 0, message: "Connecting to local backend" },
+  providerConnections: {},
   runtime: {
     adapter: "mock",
     observatoryVersion: "0.1.0",

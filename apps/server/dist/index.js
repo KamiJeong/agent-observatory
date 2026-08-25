@@ -10,18 +10,1865 @@ function consumeAccessToken(environment = process.env) {
   return configured ?? randomBytes(32).toString("base64url");
 }
 
+// apps/server/src/claude-adapter.ts
+import { spawnSync } from "node:child_process";
+import {
+  closeSync,
+  fstatSync,
+  openSync,
+  readFileSync as readFileSync2,
+  readSync,
+  readdirSync as readdirSync2,
+  readlinkSync
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename as basename2, join as join2 } from "node:path";
+
+// apps/server/src/claude-team-observer.ts
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
+var MAX_CONFIG_BYTES = 2 * 1024 * 1024;
+var MAX_TASK_BYTES = 1024 * 1024;
+var MAX_INBOX_BYTES = 4 * 1024 * 1024;
+function recordValue(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function stringValue(value) {
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function timestampValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return void 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : void 0;
+}
+function readBoundedJson(path2, maxBytes) {
+  const stat = statSync(path2);
+  if (!stat.isFile() || stat.size > maxBytes) return void 0;
+  return JSON.parse(readFileSync(path2, "utf8"));
+}
+function parseClaudeTeamConfig(text, fallbackName) {
+  let parsed;
+  try {
+    parsed = recordValue(JSON.parse(text));
+  } catch {
+    return void 0;
+  }
+  if (!parsed || !Array.isArray(parsed.members)) return void 0;
+  const name = fallbackName;
+  const leadAgentId = stringValue(parsed.leadAgentId);
+  const leadSessionId = stringValue(parsed.leadSessionId);
+  const members = [];
+  for (const item of parsed.members) {
+    const member = recordValue(item);
+    if (!member) continue;
+    const agentId = stringValue(member.agentId);
+    const memberName = stringValue(member.name);
+    if (!agentId || !memberName) continue;
+    const agentType = stringValue(member.agentType);
+    const isLead = agentId === leadAgentId || agentType === "team-lead" || memberName === "team-lead";
+    members.push({
+      agentId,
+      name: memberName,
+      kind: isLead ? "teamLead" : "teammate",
+      ...agentType ? { agentType } : {},
+      ...stringValue(member.sessionId) ? { sessionId: stringValue(member.sessionId) } : {},
+      ...stringValue(member.model) ? { model: stringValue(member.model) } : {},
+      ...stringValue(member.cwd) ? { cwd: stringValue(member.cwd) } : {},
+      ...timestampValue(member.joinedAt) !== void 0 ? { joinedAt: timestampValue(member.joinedAt) } : {}
+    });
+  }
+  if (members.length === 0) return void 0;
+  return {
+    name,
+    ...timestampValue(parsed.createdAt) !== void 0 ? { createdAt: timestampValue(parsed.createdAt) } : {},
+    ...leadAgentId ? { leadAgentId } : {},
+    ...leadSessionId ? { leadSessionId } : {},
+    members,
+    evidenceSource: "compatibility",
+    beta: true
+  };
+}
+function parseClaudeTeamTask(text, updatedAt) {
+  let task;
+  try {
+    task = recordValue(JSON.parse(text));
+  } catch {
+    return void 0;
+  }
+  if (!task) return void 0;
+  const id = stringValue(task.id);
+  const rawStatus = stringValue(task.status);
+  if (!id || rawStatus !== "pending" && rawStatus !== "in_progress" && rawStatus !== "completed") return void 0;
+  const metadata = recordValue(task.metadata);
+  return {
+    id,
+    status: rawStatus,
+    ...stringValue(task.owner) ? { owner: stringValue(task.owner) } : {},
+    internal: metadata?._internal === true,
+    updatedAt
+  };
+}
+function protocolMessage(text) {
+  if (!text.startsWith("{")) return void 0;
+  try {
+    return recordValue(JSON.parse(text));
+  } catch {
+    return void 0;
+  }
+}
+function parseClaudeTeamInbox(text, recipient) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const messages = [];
+  parsed.forEach((item, index) => {
+    const envelope = recordValue(item);
+    const from = stringValue(envelope?.from);
+    const occurredAt = timestampValue(envelope?.timestamp);
+    const textValue = stringValue(envelope?.text);
+    if (!envelope || !from || occurredAt === void 0 || !textValue) return;
+    const protocol = protocolMessage(textValue);
+    const rawType = stringValue(protocol?.type);
+    let type = rawType === "task_assignment" || rawType === "task_completed" || rawType === "idle_notification" || rawType === "shutdown_request" || rawType === "shutdown_approved" || rawType === "shutdown_rejected" || rawType === "teammate_terminated" ? rawType : "message";
+    if (rawType === "shutdown_response" && protocol?.approve === true) type = "shutdown_approved";
+    if (rawType === "shutdown_response" && protocol?.approve === false) type = "shutdown_rejected";
+    const taskId = type === "task_assignment" || type === "task_completed" ? stringValue(protocol?.taskId) : void 0;
+    const requestId = type === "shutdown_request" || type === "shutdown_approved" || type === "shutdown_rejected" ? stringValue(protocol?.requestId) ?? stringValue(protocol?.request_id) : void 0;
+    messages.push({
+      id: `${recipient}:${occurredAt}:${index}:${type}`,
+      type,
+      from,
+      recipient,
+      occurredAt,
+      ...taskId ? { taskId } : {},
+      ...requestId ? { requestId } : {},
+      ...typeof envelope.read === "boolean" ? { read: envelope.read } : {}
+    });
+  });
+  return messages;
+}
+function readTasks(claudeHome, teamName) {
+  const directory = join(claudeHome, "tasks", teamName);
+  let files;
+  try {
+    files = readdirSync(directory).filter((file) => file.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const tasks = [];
+  for (const file of files) {
+    const path2 = join(directory, file);
+    try {
+      const stat = statSync(path2);
+      if (!stat.isFile() || stat.size > MAX_TASK_BYTES) continue;
+      const task = parseClaudeTeamTask(readFileSync(path2, "utf8"), stat.mtimeMs);
+      if (task) tasks.push(task);
+    } catch {
+    }
+  }
+  return tasks;
+}
+function readMessages(teamDirectory) {
+  const inboxes = join(teamDirectory, "inboxes");
+  let files;
+  try {
+    files = readdirSync(inboxes).filter((file) => file.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const messages = [];
+  for (const file of files) {
+    const path2 = join(inboxes, file);
+    try {
+      const parsed = readBoundedJson(path2, MAX_INBOX_BYTES);
+      if (!Array.isArray(parsed)) continue;
+      messages.push(...parseClaudeTeamInbox(JSON.stringify(parsed), basename(file, ".json")));
+    } catch {
+    }
+  }
+  return messages;
+}
+function discoverClaudeAgentTeams(claudeHome) {
+  const teamsRoot = join(claudeHome, "teams");
+  let directories;
+  try {
+    directories = readdirSync(teamsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => join(teamsRoot, entry.name));
+  } catch {
+    return [];
+  }
+  const teams = [];
+  for (const directory of directories) {
+    const fallbackName = basename(directory);
+    try {
+      const config = readBoundedJson(join(directory, "config.json"), MAX_CONFIG_BYTES);
+      if (!config) continue;
+      const parsed = parseClaudeTeamConfig(JSON.stringify(config), fallbackName);
+      if (!parsed) continue;
+      teams.push({
+        ...parsed,
+        tasks: readTasks(claudeHome, fallbackName),
+        messages: readMessages(directory)
+      });
+    } catch {
+    }
+  }
+  return teams;
+}
+
+// apps/server/src/claude-adapter.ts
+var TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
+var DEFAULT_POLL_INTERVAL_MS = 2e3;
+var HISTORY_LIMIT = 80;
+var ACTIVITY_LIMIT = 50;
+function recordValue2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function stringValue2(value) {
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function numberValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function timestampValue2(value) {
+  if (typeof value !== "string") return void 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : void 0;
+}
+function parseJsonRecord(line) {
+  try {
+    return recordValue2(JSON.parse(line));
+  } catch {
+    return void 0;
+  }
+}
+function namespaceRoot(sessionId) {
+  return `claude:${sessionId}`;
+}
+function namespaceSubagent(sessionId, agentId) {
+  return `claude:${sessionId}:${agentId}`;
+}
+function requestedThreadId(threadId) {
+  return threadId.startsWith("claude:") ? threadId : `claude:${threadId}`;
+}
+function activityPresentation(name) {
+  switch (name) {
+    case "Bash":
+      return { kind: "command", title: "Running command" };
+    case "Read":
+    case "Glob":
+    case "Grep":
+      return { kind: "read", title: "Reading files" };
+    case "Write":
+    case "Edit":
+    case "NotebookEdit":
+      return { kind: "write", title: "Editing files" };
+    case "Agent":
+    case "Task":
+      return { kind: "tool", title: "Starting subagent" };
+    case "AskUserQuestion":
+      return { kind: "approval", title: "Waiting for user input" };
+    case "SendMessage":
+      return { kind: "message", title: "Messaging agent" };
+    case "Skill":
+      return { kind: "tool", title: "Using skill" };
+    default:
+      return { kind: "tool", title: name ? `Using ${name}` : "Using tool" };
+  }
+}
+function safeModelProvider(model) {
+  return model ? "anthropic" : void 0;
+}
+function nativeStatus(context, hasFinalResponse, hasUnresolvedTool) {
+  if (context.meta?.stoppedByUser) return { type: "idle" };
+  if (hasFinalResponse && !hasUnresolvedTool) return { type: "idle" };
+  if (context.processActive) return { type: "active", activeFlags: [] };
+  return context.isRoot ? { type: "notLoaded" } : { type: "idle" };
+}
+function addUsage(total, usage) {
+  total.inputTokens += numberValue(usage.input_tokens) ?? 0;
+  total.cachedInputTokens += numberValue(usage.cache_read_input_tokens) ?? 0;
+  total.outputTokens += numberValue(usage.output_tokens) ?? 0;
+  total.reasoningOutputTokens += 0;
+  total.totalTokens = total.inputTokens + total.cachedInputTokens + total.outputTokens;
+  total.modelContextWindow += 0;
+}
+function parseClaudeTranscript(text, context) {
+  const activities = /* @__PURE__ */ new Map();
+  const history = [];
+  const pending = /* @__PURE__ */ new Map();
+  const completedToolIds = /* @__PURE__ */ new Set();
+  const toolUseIds = /* @__PURE__ */ new Set();
+  const usage = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 0,
+    modelContextWindow: 0
+  };
+  let hasUsage = false;
+  let cwd = context.fallbackCwd;
+  let model;
+  let firstTimestamp = context.createdAt;
+  let lastTimestamp = context.updatedAt;
+  let latestMessageKind;
+  for (const line of text.split("\n")) {
+    const row = parseJsonRecord(line);
+    if (!row) continue;
+    cwd ??= stringValue2(row.cwd);
+    const at = timestampValue2(row.timestamp);
+    if (at !== void 0) {
+      firstTimestamp = firstTimestamp === void 0 ? at : Math.min(firstTimestamp, at);
+      lastTimestamp = lastTimestamp === void 0 ? at : Math.max(lastTimestamp, at);
+    }
+    const message = recordValue2(row.message);
+    const role2 = stringValue2(message?.role);
+    model = stringValue2(message?.model) ?? model;
+    const messageUsage = recordValue2(message?.usage);
+    if (messageUsage) {
+      addUsage(usage, messageUsage);
+      hasUsage = true;
+    }
+    const content = Array.isArray(message?.content) ? message.content : [];
+    if (role2 === "assistant") {
+      let hasText = false;
+      let hasTool = false;
+      for (const item of content) {
+        const block = recordValue2(item);
+        if (!block) continue;
+        if (block.type === "text") hasText = true;
+        if (block.type !== "tool_use") continue;
+        hasTool = true;
+        const nativeId = stringValue2(block.id);
+        if (!nativeId) continue;
+        const name = stringValue2(block.name) ?? "Tool";
+        const id = `${context.threadId}:activity:${nativeId}`;
+        const presentation = activityPresentation(name);
+        toolUseIds.add(nativeId);
+        activities.set(nativeId, {
+          provider: "claude",
+          id,
+          agentId: context.threadId,
+          kind: presentation.kind,
+          title: presentation.title,
+          startedAt: at ?? lastTimestamp ?? Date.now(),
+          evidenceSource: "transcript",
+          metadata: { provider: "claude", observation: "transcript", nativeTool: name }
+        });
+        if (name === "AskUserQuestion") {
+          pending.set(nativeId, {
+            provider: "claude",
+            id: `${context.threadId}:request:${nativeId}`,
+            agentId: context.threadId,
+            reason: "userInput",
+            title: "Claude is waiting for user input",
+            openedAt: at ?? lastTimestamp ?? Date.now(),
+            evidenceSource: "transcript"
+          });
+        }
+      }
+      latestMessageKind = hasTool ? "assistant-tool" : hasText ? "assistant-final" : latestMessageKind;
+      const uuid = stringValue2(row.uuid);
+      if (hasText && uuid) {
+        history.push({
+          provider: "claude",
+          id: `${context.threadId}:history:${uuid}`,
+          kind: "delivery",
+          actor: { type: "agent", id: context.threadId },
+          summary: "Agent response",
+          status: "sent",
+          occurredAt: at ?? lastTimestamp ?? Date.now(),
+          source: "transcript"
+        });
+      }
+    } else if (role2 === "user") {
+      let hasToolResult = false;
+      for (const item of content) {
+        const block = recordValue2(item);
+        if (block?.type !== "tool_result") continue;
+        hasToolResult = true;
+        const nativeId = stringValue2(block.tool_use_id);
+        if (!nativeId) continue;
+        completedToolIds.add(nativeId);
+        pending.delete(nativeId);
+        const activity = activities.get(nativeId);
+        if (activity) {
+          activity.completedAt = at ?? lastTimestamp ?? activity.startedAt;
+          activity.outcome = block.is_error === true ? "failed" : "completed";
+        }
+      }
+      if (!hasToolResult) {
+        latestMessageKind = "user";
+        const uuid = stringValue2(row.uuid);
+        if (uuid) {
+          history.push({
+            provider: "claude",
+            id: `${context.threadId}:history:${uuid}`,
+            kind: "request",
+            actor: { type: "human" },
+            recipients: [{ type: "agent", id: context.threadId }],
+            summary: "User request",
+            status: "sent",
+            occurredAt: at ?? lastTimestamp ?? Date.now(),
+            source: "transcript"
+          });
+        }
+      }
+    }
+  }
+  const hasFinalResponse = latestMessageKind === "assistant-final";
+  const hasUnresolvedTool = [...toolUseIds].some((id) => !completedToolIds.has(id));
+  const status = nativeStatus(context, hasFinalResponse, hasUnresolvedTool);
+  const lifecycle = context.meta?.stoppedByUser ? "interrupted" : !context.isRoot && hasFinalResponse && !hasUnresolvedTool ? "completed" : status.type === "active" ? "running" : void 0;
+  const nickname = context.isRoot ? "Claude session" : void 0;
+  const role = context.meta?.agentType;
+  const snapshot = {
+    provider: "claude",
+    id: context.threadId,
+    sessionId: context.sessionId,
+    ...context.parentThreadId ? { parentThreadId: context.parentThreadId } : {},
+    ...nickname ? { nickname } : {},
+    ...role ? { role } : {},
+    nativeStatus: status,
+    ...firstTimestamp !== void 0 ? { createdAt: firstTimestamp } : {},
+    ...lastTimestamp !== void 0 ? { updatedAt: lastTimestamp } : {},
+    ...cwd ? { cwd } : {},
+    ...model ? { model, modelProvider: safeModelProvider(model) } : {},
+    source: {
+      provider: "claude",
+      observation: "transcript",
+      schema: "compatibility",
+      contentCaptured: false,
+      agentKind: context.isRoot ? "session" : "subagent"
+    },
+    evidenceSources: ["transcript"],
+    ...context.meta?.spawnDepth !== void 0 ? { depth: context.meta.spawnDepth } : {}
+  };
+  return {
+    snapshot,
+    activities: [...activities.values()].slice(-ACTIVITY_LIMIT),
+    history: history.slice(-HISTORY_LIMIT),
+    pendingRequests: [...pending.values()],
+    ...hasUsage ? { usage } : {},
+    ...lifecycle ? { lifecycle } : {},
+    toolUseIds: [...toolUseIds]
+  };
+}
+function teamThreadId(teamName, agentId) {
+  return `claude:team:${encodeURIComponent(teamName)}:${encodeURIComponent(agentId)}`;
+}
+function emptyTeamThread(team, member, parentThreadId) {
+  const id = teamThreadId(team.name, member.agentId);
+  return {
+    path: join2("teams", team.name, "config.json"),
+    snapshot: {
+      provider: "claude",
+      id,
+      ...member.sessionId ? { sessionId: member.sessionId } : {},
+      ...parentThreadId ? { parentThreadId } : {},
+      nickname: member.name,
+      role: member.kind,
+      nativeStatus: { type: "idle" },
+      ...member.joinedAt !== void 0 ? { createdAt: member.joinedAt, updatedAt: member.joinedAt } : {},
+      ...member.cwd ? { cwd: member.cwd } : {},
+      ...member.model ? { model: member.model, modelProvider: "anthropic" } : {},
+      collaborationMode: "claude-agent-team-beta",
+      source: {
+        provider: "claude",
+        observation: "team-config",
+        schema: "compatibility",
+        contentCaptured: false,
+        beta: true,
+        agentKind: member.kind,
+        ...member.agentType ? { agentType: member.agentType } : {}
+      },
+      evidenceSources: ["compatibility"],
+      ...member.kind === "teammate" ? { depth: 1 } : {}
+    },
+    activities: [],
+    history: [],
+    pendingRequests: [],
+    toolUseIds: []
+  };
+}
+function enrichTeamThread(thread, team, member, parentThreadId) {
+  const source = recordValue2(thread.snapshot.source) ?? {};
+  thread.snapshot = {
+    ...thread.snapshot,
+    ...parentThreadId ? { parentThreadId } : {},
+    nickname: member.name,
+    role: member.kind,
+    ...member.model && !thread.snapshot.model ? { model: member.model, modelProvider: "anthropic" } : {},
+    collaborationMode: "claude-agent-team-beta",
+    source: {
+      ...source,
+      teamObservation: "config",
+      beta: true,
+      agentKind: member.kind,
+      ...member.agentType ? { agentType: member.agentType } : {}
+    },
+    evidenceSources: [.../* @__PURE__ */ new Set([...thread.snapshot.evidenceSources ?? [], "compatibility"])],
+    ...member.kind === "teammate" && thread.snapshot.depth === void 0 ? { depth: 1 } : {}
+  };
+}
+function teamMessageHistory(team, message, actorId, recipientId) {
+  const common = {
+    provider: "claude",
+    id: `claude:team:${encodeURIComponent(team.name)}:message:${message.id}`,
+    occurredAt: message.occurredAt,
+    source: "compatibility"
+  };
+  switch (message.type) {
+    case "task_assignment":
+      return {
+        ...common,
+        kind: "handoff",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Team task assigned",
+        status: "sent",
+        relationKind: "task",
+        ...message.taskId ? { correlationId: `claude:team:${team.name}:task:${message.taskId}` } : {}
+      };
+    case "task_completed":
+      return {
+        ...common,
+        kind: "completion",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Team task completed",
+        status: "completed",
+        relationKind: "task",
+        ...message.taskId ? { correlationId: `claude:team:${team.name}:task:${message.taskId}` } : {}
+      };
+    case "idle_notification":
+      return {
+        ...common,
+        kind: "completion",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Teammate became idle",
+        status: "completed"
+      };
+    case "shutdown_request":
+      return {
+        ...common,
+        kind: "decision",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Teammate shutdown requested",
+        status: "started",
+        relationKind: "handoff",
+        ...message.requestId ? { correlationId: message.requestId } : {}
+      };
+    case "shutdown_approved":
+      return {
+        ...common,
+        kind: "completion",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Teammate shutdown approved",
+        status: "completed",
+        relationKind: "handoff",
+        ...message.requestId ? { correlationId: message.requestId } : {}
+      };
+    case "shutdown_rejected":
+      return {
+        ...common,
+        kind: "decision",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Teammate shutdown rejected",
+        status: "sent",
+        relationKind: "handoff",
+        ...message.requestId ? { correlationId: message.requestId } : {}
+      };
+    case "teammate_terminated":
+      return {
+        ...common,
+        kind: "completion",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Teammate terminated",
+        status: "completed",
+        relationKind: "handoff"
+      };
+    default:
+      return {
+        ...common,
+        kind: "handoff",
+        actor: { type: "agent", id: actorId },
+        recipients: [{ type: "agent", id: recipientId }],
+        summary: "Teammate message",
+        status: "sent",
+        relationKind: "message"
+      };
+  }
+}
+function teamTaskHistory(team, task, ownerId) {
+  const status = task.status === "in_progress" ? "running" : task.status === "completed" ? "completed" : "started";
+  return {
+    provider: "claude",
+    id: `claude:team:${encodeURIComponent(team.name)}:task:${task.id}:${task.status}`,
+    kind: task.status === "completed" ? "completion" : "work",
+    actor: ownerId ? { type: "agent", id: ownerId } : { type: "system", label: "Claude team task list" },
+    summary: task.status === "completed" ? "Team task completed" : task.status === "in_progress" ? "Team task in progress" : "Team task created",
+    status,
+    correlationId: `claude:team:${team.name}:task:${task.id}`,
+    occurredAt: task.updatedAt,
+    source: "compatibility",
+    relationKind: "task"
+  };
+}
+function applyClaudeTeamEvidence(observed, teams, cwdFilter) {
+  const results = [...observed];
+  const sessionThreads = /* @__PURE__ */ new Map();
+  for (const thread of results) {
+    if (thread.snapshot.sessionId) sessionThreads.set(thread.snapshot.sessionId, thread);
+  }
+  for (const team of teams) {
+    const hasMatchingCwd = cwdFilter === "all" || team.members.some((member) => member.cwd === cwdFilter) || (team.leadSessionId ? sessionThreads.get(team.leadSessionId)?.snapshot.cwd === cwdFilter : false);
+    if (!hasMatchingCwd) continue;
+    const leadMember = team.members.find((member) => member.kind === "teamLead");
+    const leadSessionId = leadMember?.sessionId ?? team.leadSessionId;
+    let leadThread = leadSessionId ? sessionThreads.get(leadSessionId) : void 0;
+    if (!leadThread && leadMember) {
+      leadThread = emptyTeamThread(team, leadMember);
+      results.push(leadThread);
+    }
+    if (leadThread && leadMember) enrichTeamThread(leadThread, team, leadMember);
+    const leadThreadId = leadThread?.snapshot.id;
+    const nameToThread = /* @__PURE__ */ new Map();
+    const agentIdToThread = /* @__PURE__ */ new Map();
+    for (const member of team.members) {
+      const memberSessionId = member.kind === "teamLead" ? member.sessionId ?? team.leadSessionId : member.sessionId;
+      let thread = memberSessionId ? sessionThreads.get(memberSessionId) : void 0;
+      if (!thread) {
+        thread = emptyTeamThread(team, member, member.kind === "teammate" ? leadThreadId : void 0);
+        results.push(thread);
+      } else {
+        enrichTeamThread(thread, team, member, member.kind === "teammate" ? leadThreadId : void 0);
+      }
+      nameToThread.set(member.name, thread);
+      agentIdToThread.set(member.agentId, thread);
+    }
+    const ensureFormerTeammate = (name) => {
+      const known = nameToThread.get(name) ?? agentIdToThread.get(name);
+      if (known) return known;
+      const member = {
+        agentId: `${name}@${team.name}`,
+        name,
+        kind: name === "team-lead" ? "teamLead" : "teammate"
+      };
+      const thread = emptyTeamThread(team, member, member.kind === "teammate" ? leadThreadId : void 0);
+      thread.snapshot.source = {
+        ...recordValue2(thread.snapshot.source),
+        teamObservation: "mailbox",
+        formerMember: true
+      };
+      results.push(thread);
+      nameToThread.set(name, thread);
+      return thread;
+    };
+    for (const task of team.tasks) {
+      if (task.internal) continue;
+      const owner = task.owner ? ensureFormerTeammate(task.owner) : leadThread;
+      const event = teamTaskHistory(team, task, owner?.snapshot.id);
+      (owner ?? leadThread)?.history.push(event);
+    }
+    for (const message of team.messages) {
+      const actor = ensureFormerTeammate(message.from);
+      const recipient = ensureFormerTeammate(message.recipient);
+      actor.history.push(teamMessageHistory(team, message, actor.snapshot.id, recipient.snapshot.id));
+      if (message.type === "idle_notification" && message.occurredAt >= (actor.snapshot.updatedAt ?? 0)) {
+        actor.snapshot.nativeStatus = { type: "idle" };
+        actor.snapshot.updatedAt = message.occurredAt;
+      }
+      if (message.type === "shutdown_approved" || message.type === "teammate_terminated") {
+        actor.snapshot.nativeStatus = { type: "idle" };
+        actor.snapshot.updatedAt = Math.max(actor.snapshot.updatedAt ?? 0, message.occurredAt);
+        actor.lifecycle = "shutdown";
+      }
+    }
+  }
+  for (const thread of results) thread.history = thread.history.slice(-HISTORY_LIMIT);
+  return results;
+}
+function readTail(path2, maxBytes = TRANSCRIPT_TAIL_BYTES) {
+  const fd = openSync(path2, "r");
+  try {
+    const stat = fstatSync(fd);
+    const length = Math.min(stat.size, maxBytes);
+    const start = stat.size - length;
+    const buffer = Buffer.alloc(length);
+    if (length > 0) readSync(fd, buffer, 0, length, start);
+    let text = buffer.toString("utf8");
+    if (start > 0) {
+      const newline = text.indexOf("\n");
+      text = newline === -1 ? "" : text.slice(newline + 1);
+    }
+    return { text, stat };
+  } finally {
+    closeSync(fd);
+  }
+}
+function parseSubagentMeta(path2) {
+  try {
+    const parsed = recordValue2(JSON.parse(readFileSync2(path2, "utf8")));
+    if (!parsed) return void 0;
+    return {
+      ...stringValue2(parsed.agentType) ? { agentType: stringValue2(parsed.agentType) } : {},
+      ...stringValue2(parsed.toolUseId) ? { toolUseId: stringValue2(parsed.toolUseId) } : {},
+      ...numberValue(parsed.spawnDepth) !== void 0 ? { spawnDepth: numberValue(parsed.spawnDepth) } : {},
+      ...typeof parsed.stoppedByUser === "boolean" ? { stoppedByUser: parsed.stoppedByUser } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
+function looksLikeInteractiveClaude(command) {
+  const index = command.findIndex((token) => {
+    const name = basename2(token).toLowerCase();
+    return name === "claude" || name === "claude.exe";
+  });
+  if (index === -1) return false;
+  const args = command.slice(index + 1);
+  if (args.includes("-p") || args.includes("--print")) return false;
+  const nonInteractive = /* @__PURE__ */ new Set(["auth", "doctor", "install", "mcp", "plugin", "update", "upgrade"]);
+  const commandName = args.find((arg) => !arg.startsWith("-"));
+  return !commandName || !nonInteractive.has(commandName);
+}
+function findInteractiveClaudeCwds(procRoot = "/proc") {
+  const cwdCounts = /* @__PURE__ */ new Map();
+  let processCount = 0;
+  let entries;
+  try {
+    entries = readdirSync2(procRoot).filter((entry) => /^\d+$/.test(entry));
+  } catch {
+    return {
+      cwdCounts,
+      processCount,
+      exact: false,
+      source: "unsupported",
+      warning: "Claude process discovery requires procfs on this platform"
+    };
+  }
+  for (const pid of entries) {
+    try {
+      const command = readFileSync2(join2(procRoot, pid, "cmdline"), "utf8").split("\0").filter(Boolean);
+      if (!looksLikeInteractiveClaude(command)) continue;
+      processCount += 1;
+      const cwd = readlinkSync(join2(procRoot, pid, "cwd"));
+      if (cwd) cwdCounts.set(cwd, (cwdCounts.get(cwd) ?? 0) + 1);
+    } catch {
+    }
+  }
+  return { cwdCounts, processCount, exact: true, source: "procfs" };
+}
+function cliVersion() {
+  const result = spawnSync("claude", ["--version"], { encoding: "utf8", timeout: 5e3 });
+  if (result.error || result.status !== 0) return "unknown";
+  return (result.stdout ?? "").trim().replace(/\s*\(Claude Code\)\s*$/, "") || "unknown";
+}
+var ClaudeCodeAdapter = class {
+  provider = "claude";
+  mode = "claude";
+  #listeners = /* @__PURE__ */ new Set();
+  #threads = /* @__PURE__ */ new Map();
+  #seenActivities = /* @__PURE__ */ new Set();
+  #seenHistory = /* @__PURE__ */ new Set();
+  #seenRequests = /* @__PURE__ */ new Set();
+  #lifecycle = /* @__PURE__ */ new Map();
+  #timer;
+  #connected = false;
+  #version = "unknown";
+  #claudeHome;
+  #cwd;
+  #pollIntervalMs;
+  #now;
+  #processDiscovery;
+  constructor(options = {}) {
+    this.#claudeHome = options.claudeHome ?? join2(homedir(), ".claude");
+    this.#cwd = options.cwd ?? process.env.OBSERVATORY_CWD ?? process.env.INIT_CWD ?? process.cwd();
+    this.#pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.#now = options.now ?? Date.now;
+    this.#processDiscovery = options.processDiscovery ?? findInteractiveClaudeCwds;
+  }
+  runtimeInfo() {
+    return {
+      adapter: "claude",
+      provider: "claude",
+      observatoryVersion: "0.1.0",
+      claudeCliVersion: this.#version,
+      experimentalApi: false,
+      discoveryStrategy: "compatibility",
+      contentCapture: "metadata-only"
+    };
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  async connect() {
+    if (this.#connected) return;
+    this.#connected = true;
+    this.#emit({
+      type: "connection.changed",
+      at: this.#now(),
+      connection: { phase: "connecting", attempt: 0, message: "Discovering Claude Code sessions" }
+    });
+    this.#version = cliVersion();
+    await this.#refresh(true);
+    this.#emit({ type: "runtime.updated", at: this.#now(), runtime: this.runtimeInfo() });
+    this.#emit({
+      type: "connection.changed",
+      at: this.#now(),
+      connection: { phase: "connected", attempt: 0, message: "Observing local Claude Code transcripts" }
+    });
+    this.#timer = setInterval(() => {
+      void this.#refresh(true).catch((error) => this.#debug("Claude compatibility refresh failed", error));
+    }, this.#pollIntervalMs);
+    this.#timer.unref?.();
+  }
+  async disconnect() {
+    this.#connected = false;
+    if (this.#timer) clearInterval(this.#timer);
+    this.#timer = void 0;
+    this.#emit({
+      type: "connection.changed",
+      at: this.#now(),
+      connection: { phase: "disconnected", attempt: 0, message: "Claude observation stopped" }
+    });
+  }
+  async listThreads(options) {
+    await this.#refresh(false);
+    const all = [...this.#threads.values()].map((thread) => thread.snapshot);
+    if (!options?.rootThreadId) return all;
+    const rootThreadId = requestedThreadId(options.rootThreadId);
+    const descendants = /* @__PURE__ */ new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const thread of all) {
+        if (thread.parentThreadId === rootThreadId || thread.parentThreadId && descendants.has(thread.parentThreadId)) {
+          if (!descendants.has(thread.id)) {
+            descendants.add(thread.id);
+            changed = true;
+          }
+        }
+      }
+    }
+    return all.filter((thread) => descendants.has(thread.id));
+  }
+  async listLoadedThreads() {
+    await this.#refresh(false);
+    return [...this.#threads.values()].filter((thread) => thread.snapshot.nativeStatus.type !== "notLoaded").map((thread) => thread.snapshot.id);
+  }
+  async readThread(threadId, _options) {
+    await this.#refresh(false);
+    const thread = this.#threads.get(requestedThreadId(threadId));
+    if (!thread) throw new Error(`Claude thread not found: ${threadId}`);
+    return thread.snapshot;
+  }
+  async #refresh(emit) {
+    const processDiscovery = this.#processDiscovery();
+    const observed = this.#scanTranscripts(processDiscovery.cwdCounts);
+    this.#threads = new Map(observed.map((thread) => [thread.snapshot.id, thread]));
+    if (!emit) return;
+    for (const thread of observed) this.#emitThread(thread);
+    if (processDiscovery.warning) this.#debug(processDiscovery.warning);
+  }
+  #scanTranscripts(activeCwds) {
+    const projectsRoot = join2(this.#claudeHome, "projects");
+    let projectDirs;
+    try {
+      projectDirs = readdirSync2(projectsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => join2(projectsRoot, entry.name));
+    } catch {
+      projectDirs = [];
+    }
+    const results = [];
+    for (const projectDir of projectDirs) {
+      let files;
+      try {
+        files = readdirSync2(projectDir).filter((name) => name.endsWith(".jsonl"));
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        const path2 = join2(projectDir, file);
+        const fallbackSessionId = file.slice(0, -".jsonl".length);
+        let rootTail;
+        try {
+          rootTail = readTail(path2);
+        } catch {
+          continue;
+        }
+        const sessionId = this.#sessionId(rootTail.text) ?? fallbackSessionId;
+        const rootId = namespaceRoot(sessionId);
+        const fallbackCwd = this.#transcriptCwd(rootTail.text);
+        if (this.#cwd !== "all" && fallbackCwd !== this.#cwd) continue;
+        const processActive = fallbackCwd ? (activeCwds.get(fallbackCwd) ?? 0) > 0 : false;
+        const root = parseClaudeTranscript(rootTail.text, {
+          threadId: rootId,
+          sessionId,
+          fallbackCwd,
+          isRoot: true,
+          processActive,
+          createdAt: rootTail.stat.birthtimeMs || void 0,
+          updatedAt: rootTail.stat.mtimeMs
+        });
+        results.push({ ...root, path: path2 });
+        const subagentsDir = join2(projectDir, sessionId, "subagents");
+        let agentFiles;
+        try {
+          agentFiles = readdirSync2(subagentsDir).filter((name) => name.startsWith("agent-") && name.endsWith(".jsonl"));
+        } catch {
+          continue;
+        }
+        const parsedAgents = [];
+        for (const agentFile of agentFiles) {
+          const agentPath = join2(subagentsDir, agentFile);
+          const nativeAgentId = agentFile.slice(0, -".jsonl".length);
+          const threadId = namespaceSubagent(sessionId, nativeAgentId);
+          let tail;
+          try {
+            tail = readTail(agentPath);
+          } catch {
+            continue;
+          }
+          const meta = parseSubagentMeta(join2(subagentsDir, `${nativeAgentId}.meta.json`));
+          const parsed = parseClaudeTranscript(tail.text, {
+            threadId,
+            sessionId,
+            parentThreadId: rootId,
+            fallbackCwd,
+            isRoot: false,
+            processActive,
+            createdAt: tail.stat.birthtimeMs || void 0,
+            updatedAt: tail.stat.mtimeMs,
+            meta
+          });
+          parsedAgents.push({ observed: { ...parsed, path: agentPath }, meta });
+        }
+        const toolOwner = /* @__PURE__ */ new Map();
+        for (const id of root.toolUseIds) toolOwner.set(id, rootId);
+        for (const { observed } of parsedAgents) {
+          for (const id of observed.toolUseIds) toolOwner.set(id, observed.snapshot.id);
+        }
+        for (const { observed, meta } of parsedAgents) {
+          const parent = meta?.toolUseId ? toolOwner.get(meta.toolUseId) : void 0;
+          if (parent && parent !== observed.snapshot.id) observed.snapshot.parentThreadId = parent;
+          results.push(observed);
+        }
+      }
+    }
+    return applyClaudeTeamEvidence(results, discoverClaudeAgentTeams(this.#claudeHome), this.#cwd);
+  }
+  #sessionId(text) {
+    for (const line of text.split("\n")) {
+      const sessionId = stringValue2(parseJsonRecord(line)?.sessionId);
+      if (sessionId) return sessionId;
+    }
+    return void 0;
+  }
+  #transcriptCwd(text) {
+    for (const line of text.split("\n")) {
+      const cwd = stringValue2(parseJsonRecord(line)?.cwd);
+      if (cwd) return cwd;
+    }
+    return void 0;
+  }
+  #emitThread(thread) {
+    const at = this.#now();
+    this.#emit({ type: "thread.discovered", at, thread: thread.snapshot });
+    for (const activity of thread.activities) {
+      if (this.#seenActivities.has(activity.id)) continue;
+      this.#seenActivities.add(activity.id);
+      this.#emit({ type: "activity.started", at: activity.startedAt, activity });
+      if (activity.completedAt !== void 0) {
+        this.#emit({
+          type: "activity.completed",
+          at: activity.completedAt,
+          threadId: activity.agentId,
+          activityId: activity.id,
+          activity,
+          outcome: activity.outcome
+        });
+      }
+    }
+    for (const history of thread.history) {
+      if (this.#seenHistory.has(history.id)) continue;
+      this.#seenHistory.add(history.id);
+      this.#emit({ type: "history.recorded", at: history.occurredAt, history });
+    }
+    const openRequestIds = new Set(thread.pendingRequests.map((request) => request.id));
+    for (const request of thread.pendingRequests) {
+      if (this.#seenRequests.has(request.id)) continue;
+      this.#seenRequests.add(request.id);
+      this.#emit({ type: "request.opened", at: request.openedAt, request });
+    }
+    for (const requestId of [...this.#seenRequests]) {
+      if (!requestId.startsWith(`${thread.snapshot.id}:request:`) || openRequestIds.has(requestId)) continue;
+      this.#seenRequests.delete(requestId);
+      this.#emit({ type: "request.resolved", at, requestId, threadId: thread.snapshot.id });
+    }
+    if (thread.usage) this.#emit({ type: "token.updated", at, threadId: thread.snapshot.id, usage: thread.usage });
+    const previousLifecycle = this.#lifecycle.get(thread.snapshot.id);
+    if (thread.lifecycle && previousLifecycle !== thread.lifecycle) {
+      this.#lifecycle.set(thread.snapshot.id, thread.lifecycle);
+      this.#emit({
+        type: "agent.lifecycle",
+        at,
+        threadId: thread.snapshot.id,
+        status: thread.lifecycle
+      });
+    }
+  }
+  #emit(event) {
+    const tagged = { ...event, provider: "claude" };
+    for (const listener of this.#listeners) listener(tagged);
+  }
+  #debug(summary, payload) {
+    const at = this.#now();
+    this.#emit({
+      type: "debug",
+      at,
+      entry: {
+        id: `${at}:${Math.random().toString(36).slice(2)}`,
+        at,
+        direction: "internal",
+        category: "connection",
+        summary,
+        ...payload instanceof Error ? { payload: { name: payload.name, message: payload.message } } : {}
+      }
+    });
+  }
+};
+
+// packages/observatory-core/src/projector.ts
+var DEFAULT_ACTIVITY_LIMIT = 300;
+var DEFAULT_HISTORY_LIMIT = 500;
+var DEFAULT_DEBUG_LIMIT = 150;
+var RECENT_ACTIVITY_LIMIT = 30;
+function projectNativeStatus(status) {
+  switch (status.type) {
+    case "active": {
+      const waitingReasons = [];
+      if (status.activeFlags.includes("waitingOnApproval")) {
+        waitingReasons.push("approval");
+      }
+      if (status.activeFlags.includes("waitingOnUserInput")) {
+        waitingReasons.push("userInput");
+      }
+      return {
+        status: waitingReasons.length > 0 ? "waiting" : "working",
+        waitingReasons
+      };
+    }
+    case "idle":
+      return { status: "idle", waitingReasons: [] };
+    case "systemError":
+      return { status: "failed", waitingReasons: [] };
+    case "notLoaded":
+      return { status: "unknown", waitingReasons: [] };
+  }
+}
+function createInitialState(runtime, now = Date.now()) {
+  const providerConnections = Object.fromEntries(
+    (runtime.providers ?? []).filter((provider) => provider.connection).map((provider) => [provider.provider, provider.connection])
+  );
+  return {
+    agents: {},
+    activities: [],
+    history: [],
+    pendingRequests: {},
+    connection: { phase: "connecting", attempt: 0 },
+    providerConnections,
+    runtime,
+    debug: [],
+    startedAt: now,
+    revision: 0
+  };
+}
+function runtimeProvider(runtime) {
+  return runtime.provider ?? (runtime.adapter === "composite" ? "unknown" : runtime.adapter);
+}
+function eventProvider(state, event) {
+  if (event.provider) return event.provider;
+  if (event.type === "thread.discovered" && event.thread.provider) return event.thread.provider;
+  if (event.type === "activity.started" && event.activity.provider) return event.activity.provider;
+  if (event.type === "activity.completed" && event.activity?.provider) return event.activity.provider;
+  if (event.type === "history.recorded" && event.history.provider) return event.history.provider;
+  if (event.type === "request.opened" && event.request.provider) return event.request.provider;
+  if (event.type === "debug" && event.entry.provider) return event.entry.provider;
+  return runtimeProvider(state.runtime);
+}
+function agentFromThread(thread, provider) {
+  const projected = projectNativeStatus(thread.nativeStatus);
+  return {
+    provider: thread.provider ?? provider,
+    id: thread.id,
+    threadId: thread.id,
+    ...thread.parentThreadId ? { parentId: thread.parentThreadId } : {},
+    ...thread.sessionId ? { sessionId: thread.sessionId } : {},
+    ...thread.nickname ? { nickname: thread.nickname } : {},
+    ...thread.role ? { role: thread.role } : {},
+    status: projected.status,
+    nativeStatus: thread.nativeStatus,
+    waitingReasons: projected.waitingReasons,
+    ...thread.createdAt ? { startedAt: thread.createdAt } : {},
+    ...thread.updatedAt ? { updatedAt: thread.updatedAt } : {},
+    recentActivityIds: [],
+    children: [],
+    ...thread.cwd ? { cwd: thread.cwd } : {},
+    ...thread.model ? { model: thread.model } : {},
+    ...thread.modelProvider ? { modelProvider: thread.modelProvider } : {},
+    ...thread.reasoningEffort ? { reasoningEffort: thread.reasoningEffort } : {},
+    ...thread.observedSkills ? { observedSkills: thread.observedSkills } : {},
+    ...thread.observedWorkflows ? { observedWorkflows: thread.observedWorkflows } : {},
+    ...thread.collaborationMode ? { collaborationMode: thread.collaborationMode } : {},
+    ...thread.source !== void 0 ? { source: thread.source } : {},
+    ...thread.depth !== void 0 ? { depth: thread.depth } : {},
+    ...thread.path ? { path: thread.path } : {},
+    ...thread.evidenceSources ? { evidenceSources: thread.evidenceSources } : {}
+  };
+}
+function ensureAgent(state, threadId, at, provider = runtimeProvider(state.runtime)) {
+  return state.agents[threadId] ?? {
+    provider,
+    id: threadId,
+    threadId,
+    status: "unknown",
+    waitingReasons: [],
+    updatedAt: at,
+    recentActivityIds: [],
+    children: []
+  };
+}
+function waitingReasonsFromRequests(state, threadId) {
+  return Array.from(
+    new Set(
+      Object.values(state.pendingRequests).filter((request) => request.agentId === threadId).map((request) => request.reason)
+    )
+  );
+}
+function rebuildChildren(agents) {
+  const next = Object.fromEntries(
+    Object.entries(agents).map(([id, agent]) => [id, { ...agent, children: [] }])
+  );
+  for (const agent of Object.values(next)) {
+    if (!agent.parentId) continue;
+    const parent = next[agent.parentId];
+    if (parent && !parent.children.includes(agent.id)) parent.children.push(agent.id);
+  }
+  for (const agent of Object.values(next)) agent.children.sort();
+  return next;
+}
+function agentActor(id) {
+  return { type: "agent", id };
+}
+function recordHistory(state, history, limit) {
+  const actorProvider = history.actor.type === "agent" && history.actor.id ? state.agents[history.actor.id]?.provider : void 0;
+  const tagged = { ...history, provider: history.provider ?? actorProvider ?? runtimeProvider(state.runtime) };
+  return [tagged, ...state.history.filter((item) => item.id !== history.id)].slice(0, limit);
+}
+function boundedHistoryContent(content) {
+  if (!content) return void 0;
+  return content.length > 2e3 ? `${content.slice(0, 1999)}\u2026` : content;
+}
+function resolveHistoryRecipients(state, history) {
+  if (history.kind !== "delivery" || history.actor.type !== "agent" || !history.actor.id) return history;
+  if (history.recipients?.length !== 1 || history.recipients[0]?.type !== "human") return history;
+  const parentId = state.agents[history.actor.id]?.parentId;
+  return parentId ? { ...history, recipients: [agentActor(parentId)] } : history;
+}
+function activityHistory(activity, status) {
+  if (activity.kind === "approval") return void 0;
+  const content = boundedHistoryContent(activity.detail);
+  return {
+    id: `activity:${activity.id}`,
+    provider: activity.provider,
+    kind: activity.kind === "message" ? "delivery" : "work",
+    actor: agentActor(activity.agentId),
+    ...activity.kind === "message" ? { recipients: [{ type: "human" }] } : {},
+    summary: activity.title,
+    ...content ? { content } : {},
+    status,
+    correlationId: activity.id,
+    occurredAt: activity.startedAt,
+    source: "derived"
+  };
+}
+function reduceEvent(state, event, limits = {
+  activities: DEFAULT_ACTIVITY_LIMIT,
+  debug: DEFAULT_DEBUG_LIMIT,
+  history: DEFAULT_HISTORY_LIMIT
+}) {
+  const historyLimit = limits.history ?? DEFAULT_HISTORY_LIMIT;
+  const provider = eventProvider(state, event);
+  let next = {
+    ...state,
+    agents: { ...state.agents },
+    pendingRequests: { ...state.pendingRequests },
+    providerConnections: { ...state.providerConnections },
+    revision: state.revision + 1
+  };
+  switch (event.type) {
+    case "thread.discovered": {
+      const previous = state.agents[event.thread.id];
+      const discovered = agentFromThread(event.thread, provider);
+      if (previous) {
+        const terminal = previous.completionEvidence !== void 0;
+        next.agents[event.thread.id] = {
+          ...previous,
+          ...discovered,
+          ...terminal ? { status: previous.status, waitingReasons: [] } : {},
+          recentActivityIds: previous.recentActivityIds,
+          currentActivityId: previous.currentActivityId,
+          completionEvidence: previous.completionEvidence,
+          completedAt: previous.completedAt
+        };
+      } else {
+        next.agents[event.thread.id] = discovered;
+      }
+      next.agents = rebuildChildren(next.agents);
+      if (event.thread.parentThreadId) {
+        next.history = recordHistory(state, {
+          id: `spawn:${event.thread.id}`,
+          provider,
+          kind: "handoff",
+          actor: agentActor(event.thread.parentThreadId),
+          recipients: [{ type: "agent", id: event.thread.id, label: event.thread.nickname }],
+          summary: `Started ${event.thread.nickname ?? event.thread.role ?? "subagent"}`,
+          ...event.thread.role ? { content: event.thread.role } : {},
+          status: "started",
+          correlationId: event.thread.id,
+          occurredAt: event.at,
+          source: "derived",
+          relationKind: "spawn"
+        }, historyLimit);
+      }
+      break;
+    }
+    case "thread.status": {
+      const previous = ensureAgent(state, event.threadId, event.at, provider);
+      const projected = projectNativeStatus(event.status);
+      const explicitTerminal = previous.completionEvidence !== void 0;
+      next.agents[event.threadId] = {
+        ...previous,
+        nativeStatus: event.status,
+        status: explicitTerminal ? previous.status : projected.status,
+        waitingReasons: explicitTerminal ? [] : projected.waitingReasons,
+        updatedAt: event.at
+      };
+      break;
+    }
+    case "agent.lifecycle": {
+      const previous = ensureAgent(state, event.threadId, event.at, provider);
+      const mapped = { updatedAt: event.at };
+      if (event.status === "completed") {
+        Object.assign(mapped, {
+          status: "completed",
+          completedAt: event.at,
+          currentActivityId: void 0,
+          waitingReasons: [],
+          completionEvidence: "collab-completed"
+        });
+      } else if (event.status === "errored") {
+        Object.assign(mapped, {
+          status: "failed",
+          completedAt: event.at,
+          currentActivityId: void 0,
+          waitingReasons: [],
+          completionEvidence: "collab-errored"
+        });
+      } else if (event.status === "running" || event.status === "pendingInit") {
+        Object.assign(mapped, {
+          status: "working",
+          waitingReasons: [],
+          completionEvidence: void 0,
+          completedAt: void 0
+        });
+      } else if (event.status === "interrupted") {
+        Object.assign(mapped, { status: "idle", waitingReasons: [] });
+      }
+      next.agents[event.threadId] = { ...previous, ...mapped };
+      if (["completed", "errored", "interrupted"].includes(event.status)) {
+        const failed = event.status === "errored";
+        next.history = recordHistory(state, {
+          id: `lifecycle:${event.threadId}:${event.status}:${event.at}`,
+          provider,
+          kind: "completion",
+          actor: agentActor(event.threadId),
+          summary: failed ? "Agent failed" : event.status === "interrupted" ? "Agent interrupted" : "Agent completed work",
+          ...event.message ? { content: event.message } : {},
+          status: failed ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
+          occurredAt: event.at,
+          source: "derived"
+        }, historyLimit);
+      }
+      break;
+    }
+    case "turn.started": {
+      const previous = ensureAgent(state, event.threadId, event.at, provider);
+      next.agents[event.threadId] = {
+        ...previous,
+        status: "working",
+        waitingReasons: [],
+        currentTurnId: event.turnId,
+        completionEvidence: void 0,
+        completedAt: void 0,
+        updatedAt: event.at
+      };
+      next.history = recordHistory(state, {
+        id: `turn:${event.turnId}`,
+        provider,
+        kind: "work",
+        actor: agentActor(event.threadId),
+        summary: "Started work",
+        status: "running",
+        turnId: event.turnId,
+        correlationId: event.turnId,
+        occurredAt: event.at,
+        source: "derived"
+      }, historyLimit);
+      break;
+    }
+    case "turn.completed": {
+      const previous = ensureAgent(state, event.threadId, event.at, provider);
+      next.agents[event.threadId] = {
+        ...previous,
+        ...event.status === "failed" ? {
+          status: "failed",
+          completionEvidence: "turn-failed"
+        } : {},
+        currentTurnId: void 0,
+        currentActivityId: void 0,
+        updatedAt: event.at
+      };
+      next.history = recordHistory(state, {
+        id: `turn-completed:${event.turnId}`,
+        provider,
+        kind: "completion",
+        actor: agentActor(event.threadId),
+        summary: event.status === "failed" ? "Work failed" : event.status === "interrupted" ? "Work interrupted" : "Work completed",
+        ...event.error ? { content: event.error } : {},
+        status: event.status === "failed" ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
+        turnId: event.turnId,
+        correlationId: event.turnId,
+        parentEventId: `turn:${event.turnId}`,
+        occurredAt: event.at,
+        source: "derived"
+      }, historyLimit);
+      break;
+    }
+    case "activity.started": {
+      const activity = { ...event.activity, provider: event.activity.provider ?? provider };
+      const previous = ensureAgent(state, activity.agentId, event.at, provider);
+      next.activities = [activity, ...state.activities.filter((item) => item.id !== activity.id)].slice(
+        0,
+        limits.activities
+      );
+      next.agents[activity.agentId] = {
+        ...previous,
+        currentActivityId: activity.id,
+        recentActivityIds: [
+          activity.id,
+          ...previous.recentActivityIds.filter((id) => id !== activity.id)
+        ].slice(0, RECENT_ACTIVITY_LIMIT),
+        updatedAt: event.at
+      };
+      const startedHistory = activityHistory(activity, "running");
+      if (startedHistory) next.history = recordHistory(state, startedHistory, historyLimit);
+      break;
+    }
+    case "activity.completed": {
+      const previous = ensureAgent(state, event.threadId, event.at, provider);
+      const existing = state.activities.find((activity) => activity.id === event.activityId);
+      const completedSource = event.activity ?? (existing ? { ...existing, completedAt: event.at, ...event.outcome ? { outcome: event.outcome } : {} } : void 0);
+      const completed = completedSource ? { ...completedSource, provider: completedSource.provider ?? provider } : void 0;
+      next.activities = completed ? [completed, ...state.activities.filter((item) => item.id !== completed.id)].slice(0, limits.activities) : state.activities;
+      next.agents[event.threadId] = {
+        ...previous,
+        ...previous.currentActivityId === event.activityId ? { currentActivityId: void 0 } : {},
+        updatedAt: event.at
+      };
+      if (completed) {
+        const status = completed.outcome === "failed" || completed.outcome === "declined" ? "failed" : completed.outcome === "interrupted" ? "interrupted" : "completed";
+        const completedHistory = activityHistory(completed, status);
+        if (completedHistory) next.history = recordHistory(state, completedHistory, historyLimit);
+      }
+      break;
+    }
+    case "history.recorded":
+      next.history = recordHistory(
+        state,
+        resolveHistoryRecipients(state, { ...event.history, provider: event.history.provider ?? provider }),
+        historyLimit
+      );
+      break;
+    case "request.opened": {
+      const request = { ...event.request, provider: event.request.provider ?? provider };
+      next.pendingRequests[request.id] = request;
+      const previous = ensureAgent(state, request.agentId, event.at, provider);
+      const reasons = Array.from(/* @__PURE__ */ new Set([...previous.waitingReasons, request.reason]));
+      next.agents[request.agentId] = {
+        ...previous,
+        status: "waiting",
+        waitingReasons: reasons,
+        updatedAt: event.at
+      };
+      next.history = recordHistory(state, {
+        id: `request:${request.id}`,
+        provider,
+        kind: "request",
+        actor: agentActor(request.agentId),
+        recipients: [{ type: "human" }],
+        summary: request.title,
+        ...request.detail ? { content: request.detail } : {},
+        status: "running",
+        correlationId: request.id,
+        occurredAt: request.openedAt,
+        source: "derived"
+      }, historyLimit);
+      break;
+    }
+    case "request.resolved": {
+      const request = state.pendingRequests[event.requestId];
+      delete next.pendingRequests[event.requestId];
+      const threadId = event.threadId ?? request?.agentId;
+      if (threadId) {
+        const previous = ensureAgent(state, threadId, event.at, provider);
+        const remaining = waitingReasonsFromRequests(next, threadId);
+        next.agents[threadId] = {
+          ...previous,
+          status: remaining.length > 0 ? "waiting" : previous.nativeStatus?.type === "active" ? "working" : previous.status,
+          waitingReasons: remaining,
+          updatedAt: event.at
+        };
+      }
+      if (request) {
+        next.history = recordHistory(state, {
+          id: `request:${event.requestId}`,
+          provider: request.provider ?? provider,
+          kind: "request",
+          actor: agentActor(request.agentId),
+          recipients: [{ type: "human" }],
+          summary: request.title,
+          ...request.detail ? { content: request.detail } : {},
+          status: "completed",
+          correlationId: request.id,
+          occurredAt: request.openedAt,
+          source: "derived"
+        }, historyLimit);
+      }
+      break;
+    }
+    case "token.updated": {
+      const previous = ensureAgent(state, event.threadId, event.at, provider);
+      next.agents[event.threadId] = { ...previous, tokenUsage: event.usage, updatedAt: event.at };
+      break;
+    }
+    case "connection.changed":
+      next.connection = event.connection;
+      if (event.provider && next.runtime.adapter !== "composite") {
+        next.providerConnections[event.provider] = event.connection;
+      }
+      break;
+    case "provider.connection.changed":
+      next.providerConnections[event.provider] = event.connection;
+      break;
+    case "runtime.updated":
+      next.runtime = event.runtime;
+      break;
+    case "debug":
+      next.debug = [{ ...event.entry, provider: event.entry.provider ?? provider }, ...state.debug].slice(0, limits.debug);
+      break;
+  }
+  return next;
+}
+function relationFromHistory(history) {
+  if (history.relationKind) return history.relationKind;
+  if (history.kind === "handoff") return "handoff";
+  return void 0;
+}
+function actorAgentId(actor) {
+  return actor.type === "agent" ? actor.id : void 0;
+}
+function buildGraph(agents, history = []) {
+  const roots = [];
+  const edges = [];
+  for (const agent of Object.values(agents)) {
+    if (agent.parentId && agents[agent.parentId]) {
+      edges.push({
+        id: `${agent.parentId}->${agent.id}`,
+        source: agent.parentId,
+        target: agent.id,
+        kind: "spawn",
+        evidenceSource: agent.evidenceSources?.[0] ?? "derived"
+      });
+    } else {
+      roots.push(agent.id);
+    }
+  }
+  const seenRelations = /* @__PURE__ */ new Set();
+  for (const event of history) {
+    const kind = relationFromHistory(event);
+    const source = actorAgentId(event.actor);
+    if (!kind || kind === "spawn" || !source || !agents[source]) continue;
+    for (const recipient of event.recipients ?? []) {
+      const target = actorAgentId(recipient);
+      if (!target || !agents[target]) continue;
+      const relationKey = `${kind}:${source}->${target}`;
+      if (seenRelations.has(relationKey)) continue;
+      seenRelations.add(relationKey);
+      edges.push({
+        id: `${relationKey}:${event.id}`,
+        source,
+        target,
+        kind,
+        evidenceSource: event.source,
+        label: event.summary,
+        occurredAt: event.occurredAt
+      });
+    }
+  }
+  roots.sort((a, b) => (agents[a]?.startedAt ?? 0) - (agents[b]?.startedAt ?? 0));
+  return { roots, edges };
+}
+function toSnapshot(state) {
+  return { ...state, ...buildGraph(state.agents, state.history) };
+}
+
+// packages/observatory-core/src/runtime-namespace.ts
+function providerPrefix(provider) {
+  return `${encodeURIComponent(provider)}:`;
+}
+function namespaceRuntimeId(provider, id) {
+  const prefix = providerPrefix(provider);
+  return id.startsWith(prefix) ? id : `${prefix}${id}`;
+}
+function stripRuntimeIdNamespace(provider, id) {
+  const prefix = providerPrefix(provider);
+  return id.startsWith(prefix) ? id.slice(prefix.length) : void 0;
+}
+function optionalId(provider, id) {
+  return id === void 0 ? void 0 : namespaceRuntimeId(provider, id);
+}
+function namespaceActor(provider, actor) {
+  return actor.type === "agent" && actor.id ? { ...actor, id: namespaceRuntimeId(provider, actor.id) } : actor;
+}
+function namespaceThreadSnapshot(provider, thread) {
+  return {
+    ...thread,
+    provider,
+    id: namespaceRuntimeId(provider, thread.id),
+    sessionId: optionalId(provider, thread.sessionId),
+    parentThreadId: optionalId(provider, thread.parentThreadId),
+    forkedFromId: optionalId(provider, thread.forkedFromId)
+  };
+}
+function namespaceAgentActivity(provider, activity) {
+  return {
+    ...activity,
+    provider,
+    id: namespaceRuntimeId(provider, activity.id),
+    agentId: namespaceRuntimeId(provider, activity.agentId)
+  };
+}
+function namespaceHistoryEvent(provider, history) {
+  return {
+    ...history,
+    provider,
+    id: namespaceRuntimeId(provider, history.id),
+    actor: namespaceActor(provider, history.actor),
+    recipients: history.recipients?.map((recipient) => namespaceActor(provider, recipient)),
+    turnId: optionalId(provider, history.turnId),
+    correlationId: optionalId(provider, history.correlationId),
+    parentEventId: optionalId(provider, history.parentEventId)
+  };
+}
+function namespacePendingRequest(provider, request) {
+  return {
+    ...request,
+    provider,
+    id: namespaceRuntimeId(provider, request.id),
+    agentId: namespaceRuntimeId(provider, request.agentId)
+  };
+}
+function providerRuntimeInfo(provider, runtime) {
+  return { ...runtime, provider };
+}
+function namespaceRuntimeEvent(provider, event) {
+  switch (event.type) {
+    case "thread.discovered":
+      return { ...event, provider, thread: namespaceThreadSnapshot(provider, event.thread) };
+    case "thread.status":
+    case "agent.lifecycle":
+    case "token.updated":
+      return { ...event, provider, threadId: namespaceRuntimeId(provider, event.threadId) };
+    case "turn.started":
+    case "turn.completed":
+      return {
+        ...event,
+        provider,
+        threadId: namespaceRuntimeId(provider, event.threadId),
+        turnId: namespaceRuntimeId(provider, event.turnId)
+      };
+    case "activity.started":
+      return { ...event, provider, activity: namespaceAgentActivity(provider, event.activity) };
+    case "activity.completed":
+      return {
+        ...event,
+        provider,
+        threadId: namespaceRuntimeId(provider, event.threadId),
+        activityId: namespaceRuntimeId(provider, event.activityId),
+        activity: event.activity ? namespaceAgentActivity(provider, event.activity) : void 0
+      };
+    case "history.recorded":
+      return { ...event, provider, history: namespaceHistoryEvent(provider, event.history) };
+    case "request.opened":
+      return { ...event, provider, request: namespacePendingRequest(provider, event.request) };
+    case "request.resolved":
+      return {
+        ...event,
+        provider,
+        requestId: namespaceRuntimeId(provider, event.requestId),
+        threadId: optionalId(provider, event.threadId)
+      };
+    case "connection.changed":
+      return { ...event, provider };
+    case "provider.connection.changed":
+      return { ...event, provider };
+    case "runtime.updated":
+      return { ...event, provider, runtime: providerRuntimeInfo(provider, event.runtime) };
+    case "debug":
+      return {
+        ...event,
+        provider,
+        entry: {
+          ...event.entry,
+          provider,
+          id: namespaceRuntimeId(provider, event.entry.id)
+        }
+      };
+  }
+}
+
+// packages/observatory-core/src/store.ts
+var ObservatoryStore = class {
+  #state;
+  #listeners = /* @__PURE__ */ new Set();
+  constructor(runtime, now) {
+    this.#state = createInitialState(runtime, now);
+  }
+  apply(event) {
+    this.#state = reduceEvent(this.#state, event);
+    const snapshot = this.snapshot();
+    for (const listener of this.#listeners) listener(snapshot, event);
+    return snapshot;
+  }
+  snapshot() {
+    return toSnapshot(this.#state);
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+};
+
+// apps/server/src/composite-adapter.ts
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+var CompositeRuntimeAdapter = class {
+  constructor(adapters) {
+    this.adapters = adapters;
+    const providers = /* @__PURE__ */ new Set();
+    for (const adapter2 of adapters) {
+      if (providers.has(adapter2.provider)) {
+        throw new Error(`Duplicate runtime provider: ${adapter2.provider}`);
+      }
+      providers.add(adapter2.provider);
+      this.#runtimes.set(adapter2.provider, { ...adapter2.runtimeInfo(), provider: adapter2.provider });
+      this.#connections.set(adapter2.provider, { phase: "connecting", attempt: 0 });
+    }
+  }
+  adapters;
+  provider = "composite";
+  mode = "composite";
+  #listeners = /* @__PURE__ */ new Set();
+  #unsubscribers = [];
+  #connections = /* @__PURE__ */ new Map();
+  #runtimes = /* @__PURE__ */ new Map();
+  #aggregatePhase = "connecting";
+  runtimeInfo() {
+    const providers = this.adapters.map((adapter2) => {
+      const runtime = this.#runtimes.get(adapter2.provider) ?? adapter2.runtimeInfo();
+      return {
+        ...runtime,
+        provider: adapter2.provider,
+        connection: this.#connections.get(adapter2.provider)
+      };
+    });
+    return {
+      adapter: "composite",
+      provider: "composite",
+      observatoryVersion: providers[0]?.observatoryVersion ?? "unknown",
+      experimentalApi: providers.some((runtime) => runtime.experimentalApi),
+      discoveryStrategy: "composite",
+      providers
+    };
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  async connect() {
+    this.#ensureSubscriptions();
+    this.#emit({
+      type: "connection.changed",
+      at: Date.now(),
+      provider: this.provider,
+      connection: { phase: "connecting", attempt: 0 }
+    });
+    const results = await Promise.allSettled(this.adapters.map(async (adapter2) => {
+      const previous = this.#connections.get(adapter2.provider);
+      this.#setProviderConnection(adapter2.provider, {
+        phase: previous?.phase === "connected" ? "reconnecting" : "connecting",
+        attempt: (previous?.attempt ?? 0) + 1
+      });
+      try {
+        await adapter2.connect();
+        this.#setProviderConnection(adapter2.provider, {
+          phase: "connected",
+          attempt: this.#connections.get(adapter2.provider)?.attempt ?? 1
+        });
+      } catch (error) {
+        this.#setProviderConnection(adapter2.provider, {
+          phase: "disconnected",
+          attempt: this.#connections.get(adapter2.provider)?.attempt ?? 1,
+          message: errorMessage(error)
+        });
+        throw error;
+      }
+    }));
+    const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+    if (results.length > 0 && failures.length === results.length) {
+      this.#emitAggregate("disconnected");
+      throw new AggregateError(failures, "All runtime providers failed to connect");
+    }
+    this.#emitAggregate("connected");
+  }
+  async disconnect() {
+    await Promise.allSettled(this.adapters.map(async (adapter2) => {
+      try {
+        await adapter2.disconnect();
+      } finally {
+        this.#setProviderConnection(adapter2.provider, {
+          phase: "disconnected",
+          attempt: this.#connections.get(adapter2.provider)?.attempt ?? 0
+        });
+      }
+    }));
+    this.#emitAggregate("disconnected");
+    for (const unsubscribe of this.#unsubscribers.splice(0)) unsubscribe();
+  }
+  async listThreads(options) {
+    const selected = this.#selectAdapters(options?.rootThreadId);
+    const results = await Promise.allSettled(selected.map(async ({ adapter: adapter2, localRootThreadId }) => {
+      const threads = await adapter2.listThreads(
+        localRootThreadId ? { ...options, rootThreadId: localRootThreadId } : options
+      );
+      return threads.map((thread) => namespaceThreadSnapshot(adapter2.provider, thread));
+    }));
+    return results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  }
+  async listLoadedThreads() {
+    const results = await Promise.allSettled(this.adapters.map(async (adapter2) => {
+      const ids = await adapter2.listLoadedThreads();
+      return ids.map((id) => namespaceRuntimeId(adapter2.provider, id));
+    }));
+    return results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  }
+  async readThread(threadId, options) {
+    for (const adapter2 of this.adapters) {
+      const localId = stripRuntimeIdNamespace(adapter2.provider, threadId);
+      if (localId === void 0) continue;
+      return namespaceThreadSnapshot(adapter2.provider, await adapter2.readThread(localId, options));
+    }
+    throw new Error(`No runtime provider owns thread: ${threadId}`);
+  }
+  #selectAdapters(rootThreadId) {
+    if (!rootThreadId) return this.adapters.map((adapter2) => ({ adapter: adapter2 }));
+    for (const adapter2 of this.adapters) {
+      const localRootThreadId = stripRuntimeIdNamespace(adapter2.provider, rootThreadId);
+      if (localRootThreadId !== void 0) return [{ adapter: adapter2, localRootThreadId }];
+    }
+    return [];
+  }
+  #ensureSubscriptions() {
+    if (this.#unsubscribers.length > 0) return;
+    this.#unsubscribers = this.adapters.map((adapter2) => adapter2.subscribe((event) => {
+      if (event.type === "connection.changed") {
+        this.#setProviderConnection(adapter2.provider, event.connection, event.at);
+        return;
+      }
+      if (event.type === "runtime.updated") {
+        this.#runtimes.set(adapter2.provider, { ...event.runtime, provider: adapter2.provider });
+        this.#emit({
+          type: "runtime.updated",
+          at: event.at,
+          provider: this.provider,
+          runtime: this.runtimeInfo()
+        });
+        return;
+      }
+      this.#emit(namespaceRuntimeEvent(adapter2.provider, event));
+    }));
+  }
+  #setProviderConnection(provider, connection, at = Date.now()) {
+    const previous = this.#connections.get(provider);
+    this.#connections.set(provider, connection);
+    if (previous?.phase !== connection.phase || previous.attempt !== connection.attempt || previous.message !== connection.message || previous.nextRetryAt !== connection.nextRetryAt) {
+      this.#emit({ type: "provider.connection.changed", at, provider, connection });
+    }
+    const phases = Array.from(this.#connections.values(), (state) => state.phase);
+    const aggregate = phases.includes("connected") ? "connected" : phases.includes("reconnecting") ? "reconnecting" : phases.includes("connecting") ? "connecting" : "disconnected";
+    this.#emitAggregate(aggregate, at);
+  }
+  #emitAggregate(phase, at = Date.now()) {
+    if (this.#aggregatePhase === phase) return;
+    this.#aggregatePhase = phase;
+    this.#emit({
+      type: "connection.changed",
+      at,
+      provider: this.provider,
+      connection: { phase, attempt: 0 }
+    });
+  }
+  #emit(event) {
+    for (const listener of this.#listeners) listener(event);
+  }
+};
+
 // apps/server/src/codex-adapter.ts
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync as spawnSync2 } from "node:child_process";
 import readline from "node:readline";
 
 // apps/server/src/normalize.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function stringValue(value) {
+function stringValue3(value) {
   return typeof value === "string" ? value : void 0;
 }
-function numberValue(value) {
+function numberValue2(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : void 0;
 }
 function stringArray(value) {
@@ -51,36 +1898,36 @@ function spawnedSource(source) {
 function toThreadSnapshot(value) {
   if (!isRecord(value) || typeof value.id !== "string") return void 0;
   const spawn2 = spawnedSource(value.source);
-  const parentThreadId = stringValue(value.parentThreadId) ?? stringValue(spawn2?.parent_thread_id);
-  const nickname = stringValue(value.agentNickname) ?? stringValue(spawn2?.agent_nickname);
-  const role = stringValue(value.agentRole) ?? stringValue(spawn2?.agent_role);
-  const model = stringValue(value.model);
-  const reasoningEffort = stringValue(value.reasoningEffort) ?? stringValue(value.effort);
+  const parentThreadId = stringValue3(value.parentThreadId) ?? stringValue3(spawn2?.parent_thread_id);
+  const nickname = stringValue3(value.agentNickname) ?? stringValue3(spawn2?.agent_nickname);
+  const role = stringValue3(value.agentRole) ?? stringValue3(spawn2?.agent_role);
+  const model = stringValue3(value.model);
+  const reasoningEffort = stringValue3(value.reasoningEffort) ?? stringValue3(value.effort);
   const observedSkills = stringArray(value.observedSkills);
   const observedWorkflows = stringArray(value.observedWorkflows);
-  const collaborationMode = stringValue(value.collaborationMode);
-  const createdAtSeconds = numberValue(value.createdAt);
-  const updatedAtSeconds = numberValue(value.updatedAt);
+  const collaborationMode = stringValue3(value.collaborationMode);
+  const createdAtSeconds = numberValue2(value.createdAt);
+  const updatedAtSeconds = numberValue2(value.updatedAt);
   return {
     id: value.id,
-    ...stringValue(value.sessionId) ? { sessionId: stringValue(value.sessionId) } : {},
+    ...stringValue3(value.sessionId) ? { sessionId: stringValue3(value.sessionId) } : {},
     ...parentThreadId ? { parentThreadId } : {},
-    ...stringValue(value.forkedFromId) ? { forkedFromId: stringValue(value.forkedFromId) } : {},
+    ...stringValue3(value.forkedFromId) ? { forkedFromId: stringValue3(value.forkedFromId) } : {},
     ...nickname ? { nickname } : {},
     ...role ? { role } : {},
     nativeStatus: statusValue(value.status),
     ...createdAtSeconds !== void 0 ? { createdAt: createdAtSeconds * 1e3 } : {},
     ...updatedAtSeconds !== void 0 ? { updatedAt: updatedAtSeconds * 1e3 } : {},
-    ...stringValue(value.cwd) ? { cwd: stringValue(value.cwd) } : {},
+    ...stringValue3(value.cwd) ? { cwd: stringValue3(value.cwd) } : {},
     ...model ? { model } : {},
-    ...stringValue(value.modelProvider) ? { modelProvider: stringValue(value.modelProvider) } : {},
+    ...stringValue3(value.modelProvider) ? { modelProvider: stringValue3(value.modelProvider) } : {},
     ...reasoningEffort ? { reasoningEffort } : {},
     ...observedSkills ? { observedSkills } : {},
     ...observedWorkflows ? { observedWorkflows } : {},
     ...collaborationMode ? { collaborationMode } : {},
     ...value.source !== void 0 ? { source: value.source } : {},
-    ...numberValue(spawn2?.depth) !== void 0 ? { depth: numberValue(spawn2?.depth) } : {},
-    ...stringValue(spawn2?.agent_path) ? { path: stringValue(spawn2?.agent_path) } : {}
+    ...numberValue2(spawn2?.depth) !== void 0 ? { depth: numberValue2(spawn2?.depth) } : {},
+    ...stringValue3(spawn2?.agent_path) ? { path: stringValue3(spawn2?.agent_path) } : {}
   };
 }
 function commandLooksLikeTest(command) {
@@ -107,10 +1954,10 @@ function contentText(value) {
   const parts = [];
   for (const entry of value) {
     if (!isRecord(entry)) continue;
-    const text = stringValue(entry.text) ?? stringValue(entry.input_text) ?? stringValue(entry.output_text);
+    const text = stringValue3(entry.text) ?? stringValue3(entry.input_text) ?? stringValue3(entry.output_text);
     if (text) parts.push(text);
-    else if (entry.type === "skill" && stringValue(entry.name)) parts.push(`Skill: ${stringValue(entry.name)}`);
-    else if (entry.type === "mention" && stringValue(entry.name)) parts.push(`Mention: ${stringValue(entry.name)}`);
+    else if (entry.type === "skill" && stringValue3(entry.name)) parts.push(`Skill: ${stringValue3(entry.name)}`);
+    else if (entry.type === "mention" && stringValue3(entry.name)) parts.push(`Mention: ${stringValue3(entry.name)}`);
   }
   return boundedText(parts.join("\n"));
 }
@@ -124,14 +1971,14 @@ function agentRef(id, label) {
   return { type: "agent", id, ...label ? { label } : {} };
 }
 function historyFromItem(item, threadId, at, completed, turnId) {
-  const itemId = stringValue(item.id) ?? `${threadId}:${at}`;
+  const itemId = stringValue3(item.id) ?? `${threadId}:${at}`;
   const base = {
     id: `activity:${itemId}`,
     actor: agentRef(threadId),
     status: historyStatus(item, completed),
     ...turnId ? { turnId } : {},
     correlationId: itemId,
-    occurredAt: completed ? at - (numberValue(item.durationMs) ?? 0) : at,
+    occurredAt: completed ? at - (numberValue2(item.durationMs) ?? 0) : at,
     source: "protocol"
   };
   if (item.type === "userMessage") {
@@ -150,30 +1997,30 @@ function historyFromItem(item, threadId, at, completed, turnId) {
       ...base,
       kind: "decision",
       summary: "Plan updated",
-      ...boundedText(stringValue(item.text)) ? { content: boundedText(stringValue(item.text)) } : {},
+      ...boundedText(stringValue3(item.text)) ? { content: boundedText(stringValue3(item.text)) } : {},
       status: "completed"
     }];
   }
   if (item.type === "agentMessage") {
-    const phase = stringValue(item.phase);
+    const phase = stringValue3(item.phase);
     return [{
       ...base,
       kind: "delivery",
       recipients: [{ type: "human" }],
       summary: phase === "final_answer" ? "Delivered final result" : phase === "commentary" ? "Shared progress update" : "Agent message",
-      ...boundedText(stringValue(item.text)) ? { content: boundedText(stringValue(item.text)) } : {},
+      ...boundedText(stringValue3(item.text)) ? { content: boundedText(stringValue3(item.text)) } : {},
       status: phase === "final_answer" || completed ? "completed" : "sent"
     }];
   }
   if (item.type !== "collabAgentToolCall") return [];
-  const senderId = stringValue(item.senderThreadId) ?? threadId;
+  const senderId = stringValue3(item.senderThreadId) ?? threadId;
   const receivers = stringArray(item.receiverThreadIds) ?? [];
   const recipients = receivers.map((id) => agentRef(id));
-  const tool = stringValue(item.tool) ?? "collaboration";
+  const tool = stringValue3(item.tool) ?? "collaboration";
   const details = {
-    spawnAgent: { kind: "handoff", summary: "Delegated work" },
-    sendInput: { kind: "handoff", summary: "Sent message" },
-    resumeAgent: { kind: "handoff", summary: "Resumed agent" },
+    spawnAgent: { kind: "handoff", summary: "Delegated work", relationKind: "spawn" },
+    sendInput: { kind: "handoff", summary: "Sent message", relationKind: "message" },
+    resumeAgent: { kind: "handoff", summary: "Resumed agent", relationKind: "handoff" },
     wait: { kind: "work", summary: "Waited for agents" },
     closeAgent: { kind: "completion", summary: "Closed agent" }
   };
@@ -181,15 +2028,16 @@ function historyFromItem(item, threadId, at, completed, turnId) {
   const events = [{
     ...base,
     kind: detail.kind,
+    ...detail.relationKind ? { relationKind: detail.relationKind } : {},
     actor: agentRef(senderId),
     ...recipients.length > 0 ? { recipients } : {},
     summary: detail.summary,
-    ...boundedText(stringValue(item.prompt)) ? { content: boundedText(stringValue(item.prompt)) } : {}
+    ...boundedText(stringValue3(item.prompt)) ? { content: boundedText(stringValue3(item.prompt)) } : {}
   }];
   if (isRecord(item.agentsStates)) {
     for (const [receiverId, state] of Object.entries(item.agentsStates)) {
       if (!isRecord(state)) continue;
-      const message = boundedText(stringValue(state.message));
+      const message = boundedText(stringValue3(state.message));
       if (!message) continue;
       events.push({
         id: `collab-result:${itemId}:${receiverId}`,
@@ -209,11 +2057,11 @@ function historyFromItem(item, threadId, at, completed, turnId) {
   return events;
 }
 function activityFromItem(item, threadId, at, completed) {
-  const id = stringValue(item.id) ?? `${threadId}:${at}`;
+  const id = stringValue3(item.id) ?? `${threadId}:${at}`;
   const base = {
     id,
     agentId: threadId,
-    startedAt: completed ? at - (numberValue(item.durationMs) ?? 0) : at,
+    startedAt: completed ? at - (numberValue2(item.durationMs) ?? 0) : at,
     ...completed ? { completedAt: at } : {},
     ...itemOutcome(item) ? { outcome: itemOutcome(item) } : {}
   };
@@ -221,7 +2069,7 @@ function activityFromItem(item, threadId, at, completed) {
     case "reasoning":
       return { ...base, kind: "thinking", title: "Thinking" };
     case "commandExecution": {
-      const command = stringValue(item.command) ?? "Command";
+      const command = stringValue3(item.command) ?? "Command";
       const actions = Array.isArray(item.commandActions) ? item.commandActions.filter(isRecord) : [];
       const onlyReads = actions.length > 0 && actions.every(
         (action) => action.type === "read" || action.type === "listFiles" || action.type === "search"
@@ -241,7 +2089,7 @@ function activityFromItem(item, threadId, at, completed) {
     }
     case "fileChange": {
       const changes = Array.isArray(item.changes) ? item.changes.filter(isRecord) : [];
-      const paths = changes.map((change) => stringValue(change.path)).filter((path2) => Boolean(path2));
+      const paths = changes.map((change) => stringValue3(change.path)).filter((path2) => Boolean(path2));
       return {
         ...base,
         kind: "write",
@@ -254,40 +2102,40 @@ function activityFromItem(item, threadId, at, completed) {
       return {
         ...base,
         kind: "tool",
-        title: `${stringValue(item.server) ?? "MCP"} \xB7 ${stringValue(item.tool) ?? "tool"}`
+        title: `${stringValue3(item.server) ?? "MCP"} \xB7 ${stringValue3(item.tool) ?? "tool"}`
       };
     case "dynamicToolCall":
       return {
         ...base,
         kind: "tool",
-        title: [stringValue(item.namespace), stringValue(item.tool)].filter(Boolean).join(" \xB7 ") || "Tool call"
+        title: [stringValue3(item.namespace), stringValue3(item.tool)].filter(Boolean).join(" \xB7 ") || "Tool call"
       };
     case "collabAgentToolCall":
       return {
         ...base,
         kind: "tool",
-        title: `Agent \xB7 ${stringValue(item.tool) ?? "collaboration"}`,
-        ...stringValue(item.prompt) ? { detail: stringValue(item.prompt) } : {},
+        title: `Agent \xB7 ${stringValue3(item.tool) ?? "collaboration"}`,
+        ...stringValue3(item.prompt) ? { detail: stringValue3(item.prompt) } : {},
         metadata: { receiverThreadIds: item.receiverThreadIds }
       };
     case "subAgentActivity":
       return {
         ...base,
         kind: "message",
-        title: `Subagent ${stringValue(item.kind) ?? "activity"}`,
-        detail: stringValue(item.agentPath) ?? stringValue(item.agentThreadId)
+        title: `Subagent ${stringValue3(item.kind) ?? "activity"}`,
+        detail: stringValue3(item.agentPath) ?? stringValue3(item.agentThreadId)
       };
     case "agentMessage":
       return {
         ...base,
         kind: "message",
         title: "Agent message",
-        ...stringValue(item.text) ? { detail: stringValue(item.text)?.slice(0, 240) } : {}
+        ...stringValue3(item.text) ? { detail: stringValue3(item.text)?.slice(0, 240) } : {}
       };
     case "webSearch":
       return { ...base, kind: "tool", title: "Searching the web" };
     case "imageView":
-      return { ...base, kind: "read", title: "Viewing image", detail: stringValue(item.path) };
+      return { ...base, kind: "read", title: "Viewing image", detail: stringValue3(item.path) };
     case "imageGeneration":
       return { ...base, kind: "tool", title: "Generating image" };
     case "sleep":
@@ -295,7 +2143,7 @@ function activityFromItem(item, threadId, at, completed) {
     case "contextCompaction":
       return { ...base, kind: "thinking", title: "Compacting context" };
     default:
-      return { ...base, kind: "unknown", title: stringValue(item.type) ?? "Unknown activity" };
+      return { ...base, kind: "unknown", title: stringValue3(item.type) ?? "Unknown activity" };
   }
 }
 function lifecycleEvents(item, at) {
@@ -318,7 +2166,7 @@ function lifecycleEvents(item, at) {
       at,
       threadId,
       status: state.status,
-      ...stringValue(state.message) ? { message: stringValue(state.message) } : {}
+      ...stringValue3(state.message) ? { message: stringValue3(state.message) } : {}
     });
   }
   return events;
@@ -335,12 +2183,12 @@ function tokenUsage(value) {
   if (!isRecord(value)) return {};
   const total = isRecord(value.total) ? value.total : value;
   return {
-    ...numberValue(total.inputTokens) !== void 0 ? { inputTokens: numberValue(total.inputTokens) } : {},
-    ...numberValue(total.cachedInputTokens) !== void 0 ? { cachedInputTokens: numberValue(total.cachedInputTokens) } : {},
-    ...numberValue(total.outputTokens) !== void 0 ? { outputTokens: numberValue(total.outputTokens) } : {},
-    ...numberValue(total.reasoningOutputTokens) !== void 0 ? { reasoningOutputTokens: numberValue(total.reasoningOutputTokens) } : {},
-    ...numberValue(total.totalTokens) !== void 0 ? { totalTokens: numberValue(total.totalTokens) } : {},
-    ...numberValue(value.modelContextWindow) !== void 0 ? { modelContextWindow: numberValue(value.modelContextWindow) } : {}
+    ...numberValue2(total.inputTokens) !== void 0 ? { inputTokens: numberValue2(total.inputTokens) } : {},
+    ...numberValue2(total.cachedInputTokens) !== void 0 ? { cachedInputTokens: numberValue2(total.cachedInputTokens) } : {},
+    ...numberValue2(total.outputTokens) !== void 0 ? { outputTokens: numberValue2(total.outputTokens) } : {},
+    ...numberValue2(total.reasoningOutputTokens) !== void 0 ? { reasoningOutputTokens: numberValue2(total.reasoningOutputTokens) } : {},
+    ...numberValue2(total.totalTokens) !== void 0 ? { totalTokens: numberValue2(total.totalTokens) } : {},
+    ...numberValue2(value.modelContextWindow) !== void 0 ? { modelContextWindow: numberValue2(value.modelContextWindow) } : {}
   };
 }
 function normalizeEnvelope(envelope, at = Date.now()) {
@@ -349,15 +2197,15 @@ function normalizeEnvelope(envelope, at = Date.now()) {
   if (!method) return [];
   const request = requestReason(method);
   if (request && envelope.id !== void 0) {
-    const threadId = stringValue(params.threadId);
+    const threadId = stringValue3(params.threadId);
     if (!threadId) return [];
     const pending = {
       id: String(envelope.id),
       agentId: threadId,
       reason: request.reason,
       title: request.title,
-      ...stringValue(params.reason) ? { detail: stringValue(params.reason) } : {},
-      openedAt: numberValue(params.startedAtMs) ?? at
+      ...stringValue3(params.reason) ? { detail: stringValue3(params.reason) } : {},
+      openedAt: numberValue2(params.startedAtMs) ?? at
     };
     return [
       { type: "request.opened", at, request: pending },
@@ -381,22 +2229,22 @@ function normalizeEnvelope(envelope, at = Date.now()) {
       return thread ? [{ type: "thread.discovered", at, thread }] : [];
     }
     case "thread/status/changed": {
-      const threadId = stringValue(params.threadId);
+      const threadId = stringValue3(params.threadId);
       return threadId ? [{ type: "thread.status", at, threadId, status: statusValue(params.status) }] : [];
     }
     case "turn/started": {
       const turn = isRecord(params.turn) ? params.turn : {};
-      const threadId = stringValue(params.threadId);
-      const turnId = stringValue(turn.id);
+      const threadId = stringValue3(params.threadId);
+      const turnId = stringValue3(turn.id);
       return threadId && turnId ? [{ type: "turn.started", at, threadId, turnId }] : [];
     }
     case "turn/completed": {
       const turn = isRecord(params.turn) ? params.turn : {};
-      const threadId = stringValue(params.threadId);
-      const turnId = stringValue(turn.id);
-      const status = stringValue(turn.status);
+      const threadId = stringValue3(params.threadId);
+      const turnId = stringValue3(turn.id);
+      const status = stringValue3(turn.status);
       if (!threadId || !turnId || !status || !["completed", "interrupted", "failed"].includes(status)) return [];
-      const error = isRecord(turn.error) ? stringValue(turn.error.message) : void 0;
+      const error = isRecord(turn.error) ? stringValue3(turn.error.message) : void 0;
       return [{
         type: "turn.completed",
         at,
@@ -409,7 +2257,7 @@ function normalizeEnvelope(envelope, at = Date.now()) {
     case "item/started":
     case "item/completed": {
       const item = isRecord(params.item) ? params.item : void 0;
-      const threadId = stringValue(params.threadId);
+      const threadId = stringValue3(params.threadId);
       if (!item || !threadId) return [];
       const completed = method === "item/completed";
       const activity = activityFromItem(item, threadId, at, completed);
@@ -426,7 +2274,7 @@ function normalizeEnvelope(envelope, at = Date.now()) {
         threadId,
         at,
         completed,
-        stringValue(params.turnId)
+        stringValue3(params.turnId)
       ).map((history) => ({ type: "history.recorded", at, history }));
       return [activityEvent, ...historyEvents, ...lifecycleEvents(item, at)];
     }
@@ -437,28 +2285,28 @@ function normalizeEnvelope(envelope, at = Date.now()) {
         type: "request.resolved",
         at,
         requestId: String(requestId),
-        ...stringValue(params.threadId) ? { threadId: stringValue(params.threadId) } : {}
+        ...stringValue3(params.threadId) ? { threadId: stringValue3(params.threadId) } : {}
       }];
     }
     case "thread/tokenUsage/updated": {
-      const threadId = stringValue(params.threadId);
+      const threadId = stringValue3(params.threadId);
       return threadId ? [{ type: "token.updated", at, threadId, usage: tokenUsage(params.tokenUsage) }] : [];
     }
     case "error": {
-      const threadId = stringValue(params.threadId);
+      const threadId = stringValue3(params.threadId);
       const error = isRecord(params.error) ? params.error : {};
       if (!threadId) return [];
       return [{
         type: "activity.completed",
         at,
         threadId,
-        activityId: `error:${stringValue(params.turnId) ?? at}`,
+        activityId: `error:${stringValue3(params.turnId) ?? at}`,
         activity: {
-          id: `error:${stringValue(params.turnId) ?? at}`,
+          id: `error:${stringValue3(params.turnId) ?? at}`,
           agentId: threadId,
           kind: "error",
           title: "Codex error",
-          detail: stringValue(error.message) ?? "Unknown Codex error",
+          detail: stringValue3(error.message) ?? "Unknown Codex error",
           startedAt: at,
           completedAt: at,
           outcome: "failed"
@@ -500,6 +2348,7 @@ function messageFromError(value) {
   return "Unknown App Server error";
 }
 var RealCodexAdapter = class {
+  provider = "codex";
   mode = "codex";
   #listeners = /* @__PURE__ */ new Set();
   #child;
@@ -516,6 +2365,7 @@ var RealCodexAdapter = class {
   runtimeInfo() {
     return {
       adapter: "codex",
+      provider: this.provider,
       observatoryVersion: "0.1.0",
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
@@ -611,7 +2461,7 @@ var RealCodexAdapter = class {
         message: "Connecting to Codex App Server"
       }
     });
-    const version = spawnSync("codex", ["--version"], { encoding: "utf8" });
+    const version = spawnSync2("codex", ["--version"], { encoding: "utf8" });
     this.#codexVersion = version.stdout.trim().replace(/^codex-cli\s+/, "") || "unknown";
     const transport = process.env.OBSERVATORY_CODEX_TRANSPORT ?? "standalone";
     const args = transport === "proxy" ? ["app-server", "proxy"] : ["app-server"];
@@ -756,7 +2606,8 @@ var RealCodexAdapter = class {
     }, delay);
   }
   #emit(event) {
-    for (const listener of this.#listeners) listener(event);
+    const tagged = { ...event, provider: event.provider ?? this.provider };
+    for (const listener of this.#listeners) listener(tagged);
   }
   #debug(category, summary, payload, direction = "in") {
     this.#emit({
@@ -777,454 +2628,88 @@ var RealCodexAdapter = class {
 // apps/server/src/http-server.ts
 import { createServer } from "node:http";
 
-// packages/observatory-core/src/projector.ts
-var DEFAULT_ACTIVITY_LIMIT = 300;
-var DEFAULT_HISTORY_LIMIT = 500;
-var DEFAULT_DEBUG_LIMIT = 150;
-var RECENT_ACTIVITY_LIMIT = 30;
-function projectNativeStatus(status) {
-  switch (status.type) {
-    case "active": {
-      const waitingReasons = [];
-      if (status.activeFlags.includes("waitingOnApproval")) {
-        waitingReasons.push("approval");
-      }
-      if (status.activeFlags.includes("waitingOnUserInput")) {
-        waitingReasons.push("userInput");
-      }
-      return {
-        status: waitingReasons.length > 0 ? "waiting" : "working",
-        waitingReasons
-      };
-    }
-    case "idle":
-      return { status: "idle", waitingReasons: [] };
-    case "systemError":
-      return { status: "failed", waitingReasons: [] };
-    case "notLoaded":
-      return { status: "unknown", waitingReasons: [] };
-  }
-}
-function createInitialState(runtime, now = Date.now()) {
-  return {
-    agents: {},
-    activities: [],
-    history: [],
-    pendingRequests: {},
-    connection: { phase: "connecting", attempt: 0 },
-    runtime,
-    debug: [],
-    startedAt: now,
-    revision: 0
-  };
-}
-function agentFromThread(thread) {
-  const projected = projectNativeStatus(thread.nativeStatus);
-  return {
-    id: thread.id,
-    threadId: thread.id,
-    ...thread.parentThreadId ? { parentId: thread.parentThreadId } : {},
-    ...thread.sessionId ? { sessionId: thread.sessionId } : {},
-    ...thread.nickname ? { nickname: thread.nickname } : {},
-    ...thread.role ? { role: thread.role } : {},
-    status: projected.status,
-    nativeStatus: thread.nativeStatus,
-    waitingReasons: projected.waitingReasons,
-    ...thread.createdAt ? { startedAt: thread.createdAt } : {},
-    ...thread.updatedAt ? { updatedAt: thread.updatedAt } : {},
-    recentActivityIds: [],
-    children: [],
-    ...thread.cwd ? { cwd: thread.cwd } : {},
-    ...thread.model ? { model: thread.model } : {},
-    ...thread.modelProvider ? { modelProvider: thread.modelProvider } : {},
-    ...thread.reasoningEffort ? { reasoningEffort: thread.reasoningEffort } : {},
-    ...thread.observedSkills ? { observedSkills: thread.observedSkills } : {},
-    ...thread.observedWorkflows ? { observedWorkflows: thread.observedWorkflows } : {},
-    ...thread.collaborationMode ? { collaborationMode: thread.collaborationMode } : {},
-    ...thread.source !== void 0 ? { source: thread.source } : {},
-    ...thread.depth !== void 0 ? { depth: thread.depth } : {},
-    ...thread.path ? { path: thread.path } : {}
-  };
-}
-function ensureAgent(state, threadId, at) {
-  return state.agents[threadId] ?? {
-    id: threadId,
-    threadId,
-    status: "unknown",
-    waitingReasons: [],
-    updatedAt: at,
-    recentActivityIds: [],
-    children: []
-  };
-}
-function waitingReasonsFromRequests(state, threadId) {
-  return Array.from(
-    new Set(
-      Object.values(state.pendingRequests).filter((request) => request.agentId === threadId).map((request) => request.reason)
-    )
-  );
-}
-function rebuildChildren(agents) {
-  const next = Object.fromEntries(
-    Object.entries(agents).map(([id, agent]) => [id, { ...agent, children: [] }])
-  );
-  for (const agent of Object.values(next)) {
-    if (!agent.parentId) continue;
-    const parent = next[agent.parentId];
-    if (parent && !parent.children.includes(agent.id)) parent.children.push(agent.id);
-  }
-  for (const agent of Object.values(next)) agent.children.sort();
-  return next;
-}
-function agentActor(id) {
-  return { type: "agent", id };
-}
-function recordHistory(state, history, limit) {
-  return [history, ...state.history.filter((item) => item.id !== history.id)].slice(0, limit);
-}
-function boundedHistoryContent(content) {
-  if (!content) return void 0;
-  return content.length > 2e3 ? `${content.slice(0, 1999)}\u2026` : content;
-}
-function resolveHistoryRecipients(state, history) {
-  if (history.kind !== "delivery" || history.actor.type !== "agent" || !history.actor.id) return history;
-  if (history.recipients?.length !== 1 || history.recipients[0]?.type !== "human") return history;
-  const parentId = state.agents[history.actor.id]?.parentId;
-  return parentId ? { ...history, recipients: [agentActor(parentId)] } : history;
-}
-function activityHistory(activity, status) {
-  if (activity.kind === "approval") return void 0;
-  const content = boundedHistoryContent(activity.detail);
-  return {
-    id: `activity:${activity.id}`,
-    kind: activity.kind === "message" ? "delivery" : "work",
-    actor: agentActor(activity.agentId),
-    ...activity.kind === "message" ? { recipients: [{ type: "human" }] } : {},
-    summary: activity.title,
-    ...content ? { content } : {},
-    status,
-    correlationId: activity.id,
-    occurredAt: activity.startedAt,
-    source: "derived"
-  };
-}
-function reduceEvent(state, event, limits = {
-  activities: DEFAULT_ACTIVITY_LIMIT,
-  debug: DEFAULT_DEBUG_LIMIT,
-  history: DEFAULT_HISTORY_LIMIT
-}) {
-  const historyLimit = limits.history ?? DEFAULT_HISTORY_LIMIT;
-  let next = {
-    ...state,
-    agents: { ...state.agents },
-    pendingRequests: { ...state.pendingRequests },
-    revision: state.revision + 1
-  };
-  switch (event.type) {
-    case "thread.discovered": {
-      const previous = state.agents[event.thread.id];
-      const discovered = agentFromThread(event.thread);
-      if (previous) {
-        const terminal = previous.completionEvidence !== void 0;
-        next.agents[event.thread.id] = {
-          ...previous,
-          ...discovered,
-          ...terminal ? { status: previous.status, waitingReasons: [] } : {},
-          recentActivityIds: previous.recentActivityIds,
-          currentActivityId: previous.currentActivityId,
-          completionEvidence: previous.completionEvidence,
-          completedAt: previous.completedAt
-        };
-      } else {
-        next.agents[event.thread.id] = discovered;
-      }
-      next.agents = rebuildChildren(next.agents);
-      if (event.thread.parentThreadId) {
-        next.history = recordHistory(state, {
-          id: `spawn:${event.thread.id}`,
-          kind: "handoff",
-          actor: agentActor(event.thread.parentThreadId),
-          recipients: [{ type: "agent", id: event.thread.id, label: event.thread.nickname }],
-          summary: `Started ${event.thread.nickname ?? event.thread.role ?? "subagent"}`,
-          ...event.thread.role ? { content: event.thread.role } : {},
-          status: "started",
-          correlationId: event.thread.id,
-          occurredAt: event.at,
-          source: "derived"
-        }, historyLimit);
-      }
-      break;
-    }
-    case "thread.status": {
-      const previous = ensureAgent(state, event.threadId, event.at);
-      const projected = projectNativeStatus(event.status);
-      const explicitTerminal = previous.completionEvidence !== void 0;
-      next.agents[event.threadId] = {
-        ...previous,
-        nativeStatus: event.status,
-        status: explicitTerminal ? previous.status : projected.status,
-        waitingReasons: explicitTerminal ? [] : projected.waitingReasons,
-        updatedAt: event.at
-      };
-      break;
-    }
-    case "agent.lifecycle": {
-      const previous = ensureAgent(state, event.threadId, event.at);
-      const mapped = { updatedAt: event.at };
-      if (event.status === "completed") {
-        Object.assign(mapped, {
-          status: "completed",
-          completedAt: event.at,
-          currentActivityId: void 0,
-          waitingReasons: [],
-          completionEvidence: "collab-completed"
-        });
-      } else if (event.status === "errored") {
-        Object.assign(mapped, {
-          status: "failed",
-          completedAt: event.at,
-          currentActivityId: void 0,
-          waitingReasons: [],
-          completionEvidence: "collab-errored"
-        });
-      } else if (event.status === "running" || event.status === "pendingInit") {
-        Object.assign(mapped, {
-          status: "working",
-          waitingReasons: [],
-          completionEvidence: void 0,
-          completedAt: void 0
-        });
-      } else if (event.status === "interrupted") {
-        Object.assign(mapped, { status: "idle", waitingReasons: [] });
-      }
-      next.agents[event.threadId] = { ...previous, ...mapped };
-      if (["completed", "errored", "interrupted"].includes(event.status)) {
-        const failed = event.status === "errored";
-        next.history = recordHistory(state, {
-          id: `lifecycle:${event.threadId}:${event.status}:${event.at}`,
-          kind: "completion",
-          actor: agentActor(event.threadId),
-          summary: failed ? "Agent failed" : event.status === "interrupted" ? "Agent interrupted" : "Agent completed work",
-          ...event.message ? { content: event.message } : {},
-          status: failed ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
-          occurredAt: event.at,
-          source: "derived"
-        }, historyLimit);
-      }
-      break;
-    }
-    case "turn.started": {
-      const previous = ensureAgent(state, event.threadId, event.at);
-      next.agents[event.threadId] = {
-        ...previous,
-        status: "working",
-        waitingReasons: [],
-        currentTurnId: event.turnId,
-        completionEvidence: void 0,
-        completedAt: void 0,
-        updatedAt: event.at
-      };
-      next.history = recordHistory(state, {
-        id: `turn:${event.turnId}`,
-        kind: "work",
-        actor: agentActor(event.threadId),
-        summary: "Started work",
-        status: "running",
-        turnId: event.turnId,
-        correlationId: event.turnId,
-        occurredAt: event.at,
-        source: "derived"
-      }, historyLimit);
-      break;
-    }
-    case "turn.completed": {
-      const previous = ensureAgent(state, event.threadId, event.at);
-      next.agents[event.threadId] = {
-        ...previous,
-        ...event.status === "failed" ? {
-          status: "failed",
-          completionEvidence: "turn-failed"
-        } : {},
-        currentTurnId: void 0,
-        currentActivityId: void 0,
-        updatedAt: event.at
-      };
-      next.history = recordHistory(state, {
-        id: `turn-completed:${event.turnId}`,
-        kind: "completion",
-        actor: agentActor(event.threadId),
-        summary: event.status === "failed" ? "Work failed" : event.status === "interrupted" ? "Work interrupted" : "Work completed",
-        ...event.error ? { content: event.error } : {},
-        status: event.status === "failed" ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
-        turnId: event.turnId,
-        correlationId: event.turnId,
-        parentEventId: `turn:${event.turnId}`,
-        occurredAt: event.at,
-        source: "derived"
-      }, historyLimit);
-      break;
-    }
-    case "activity.started": {
-      const previous = ensureAgent(state, event.activity.agentId, event.at);
-      next.activities = [event.activity, ...state.activities.filter((item) => item.id !== event.activity.id)].slice(
-        0,
-        limits.activities
-      );
-      next.agents[event.activity.agentId] = {
-        ...previous,
-        currentActivityId: event.activity.id,
-        recentActivityIds: [
-          event.activity.id,
-          ...previous.recentActivityIds.filter((id) => id !== event.activity.id)
-        ].slice(0, RECENT_ACTIVITY_LIMIT),
-        updatedAt: event.at
-      };
-      const startedHistory = activityHistory(event.activity, "running");
-      if (startedHistory) next.history = recordHistory(state, startedHistory, historyLimit);
-      break;
-    }
-    case "activity.completed": {
-      const previous = ensureAgent(state, event.threadId, event.at);
-      const existing = state.activities.find((activity) => activity.id === event.activityId);
-      const completed = event.activity ?? (existing ? { ...existing, completedAt: event.at, ...event.outcome ? { outcome: event.outcome } : {} } : void 0);
-      next.activities = completed ? [completed, ...state.activities.filter((item) => item.id !== completed.id)].slice(0, limits.activities) : state.activities;
-      next.agents[event.threadId] = {
-        ...previous,
-        ...previous.currentActivityId === event.activityId ? { currentActivityId: void 0 } : {},
-        updatedAt: event.at
-      };
-      if (completed) {
-        const status = completed.outcome === "failed" || completed.outcome === "declined" ? "failed" : completed.outcome === "interrupted" ? "interrupted" : "completed";
-        const completedHistory = activityHistory(completed, status);
-        if (completedHistory) next.history = recordHistory(state, completedHistory, historyLimit);
-      }
-      break;
-    }
-    case "history.recorded":
-      next.history = recordHistory(state, resolveHistoryRecipients(state, event.history), historyLimit);
-      break;
-    case "request.opened": {
-      next.pendingRequests[event.request.id] = event.request;
-      const previous = ensureAgent(state, event.request.agentId, event.at);
-      const reasons = Array.from(/* @__PURE__ */ new Set([...previous.waitingReasons, event.request.reason]));
-      next.agents[event.request.agentId] = {
-        ...previous,
-        status: "waiting",
-        waitingReasons: reasons,
-        updatedAt: event.at
-      };
-      next.history = recordHistory(state, {
-        id: `request:${event.request.id}`,
-        kind: "request",
-        actor: agentActor(event.request.agentId),
-        recipients: [{ type: "human" }],
-        summary: event.request.title,
-        ...event.request.detail ? { content: event.request.detail } : {},
-        status: "running",
-        correlationId: event.request.id,
-        occurredAt: event.request.openedAt,
-        source: "derived"
-      }, historyLimit);
-      break;
-    }
-    case "request.resolved": {
-      const request = state.pendingRequests[event.requestId];
-      delete next.pendingRequests[event.requestId];
-      const threadId = event.threadId ?? request?.agentId;
-      if (threadId) {
-        const previous = ensureAgent(state, threadId, event.at);
-        const remaining = waitingReasonsFromRequests(next, threadId);
-        next.agents[threadId] = {
-          ...previous,
-          status: remaining.length > 0 ? "waiting" : previous.nativeStatus?.type === "active" ? "working" : previous.status,
-          waitingReasons: remaining,
-          updatedAt: event.at
-        };
-      }
-      if (request) {
-        next.history = recordHistory(state, {
-          id: `request:${event.requestId}`,
-          kind: "request",
-          actor: agentActor(request.agentId),
-          recipients: [{ type: "human" }],
-          summary: request.title,
-          ...request.detail ? { content: request.detail } : {},
-          status: "completed",
-          correlationId: request.id,
-          occurredAt: request.openedAt,
-          source: "derived"
-        }, historyLimit);
-      }
-      break;
-    }
-    case "token.updated": {
-      const previous = ensureAgent(state, event.threadId, event.at);
-      next.agents[event.threadId] = { ...previous, tokenUsage: event.usage, updatedAt: event.at };
-      break;
-    }
-    case "connection.changed":
-      next.connection = event.connection;
-      break;
-    case "runtime.updated":
-      next.runtime = event.runtime;
-      break;
-    case "debug":
-      next.debug = [event.entry, ...state.debug].slice(0, limits.debug);
-      break;
-  }
-  return next;
-}
-function buildGraph(agents) {
-  const roots = [];
-  const edges = [];
-  for (const agent of Object.values(agents)) {
-    if (agent.parentId && agents[agent.parentId]) {
-      edges.push({
-        id: `${agent.parentId}->${agent.id}`,
-        source: agent.parentId,
-        target: agent.id
-      });
-    } else {
-      roots.push(agent.id);
-    }
-  }
-  roots.sort((a, b) => (agents[a]?.startedAt ?? 0) - (agents[b]?.startedAt ?? 0));
-  return { roots, edges };
-}
-function toSnapshot(state) {
-  return { ...state, ...buildGraph(state.agents) };
-}
-
-// packages/observatory-core/src/store.ts
-var ObservatoryStore = class {
-  #state;
-  #listeners = /* @__PURE__ */ new Set();
-  constructor(runtime, now) {
-    this.#state = createInitialState(runtime, now);
-  }
-  apply(event) {
-    this.#state = reduceEvent(this.#state, event);
-    const snapshot = this.snapshot();
-    for (const listener of this.#listeners) listener(snapshot, event);
-    return snapshot;
-  }
-  snapshot() {
-    return toSnapshot(this.#state);
-  }
-  subscribe(listener) {
-    this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
-  }
-};
-
 // apps/server/src/http/public-payload.ts
+function captureContent() {
+  return process.env.OBSERVATORY_CAPTURE_CONTENT === "1";
+}
+function mayExpose(provider) {
+  return captureContent() || provider === "mock";
+}
+function publicMetadata(metadata) {
+  if (!metadata) return void 0;
+  const safeKeys = ["provider", "observation", "nativeTool", "evidenceSource"];
+  const entries = safeKeys.filter((key) => metadata[key] !== void 0).map((key) => [key, metadata[key]]);
+  return entries.length > 0 ? Object.fromEntries(entries) : void 0;
+}
+function publicActivity(activity) {
+  if (mayExpose(activity.provider)) return activity;
+  const { detail: _detail, metadata, ...safe } = activity;
+  const sanitizedMetadata = publicMetadata(metadata);
+  return { ...safe, ...sanitizedMetadata ? { metadata: sanitizedMetadata } : {} };
+}
+function publicHistory(history) {
+  if (mayExpose(history.provider)) return history;
+  const { content: _content, ...safe } = history;
+  return safe;
+}
+function publicRequest(request) {
+  if (mayExpose(request.provider)) return request;
+  const { detail: _detail, ...safe } = request;
+  return safe;
+}
+function publicAgent(agent) {
+  if (mayExpose(agent.provider)) return agent;
+  const { source: _source, ...safe } = agent;
+  return safe;
+}
+function publicThread(thread, eventProvider2) {
+  if (mayExpose(thread.provider ?? eventProvider2)) return thread;
+  const { source: _source, ...safe } = thread;
+  return safe;
+}
 function publicSnapshot(snapshot) {
-  return { ...snapshot, debug: snapshot.debug.map(({ payload: _payload, ...entry }) => entry) };
+  return {
+    ...snapshot,
+    agents: Object.fromEntries(
+      Object.entries(snapshot.agents).map(([id, agent]) => [id, publicAgent(agent)])
+    ),
+    activities: snapshot.activities.map(publicActivity),
+    history: snapshot.history.map(publicHistory),
+    pendingRequests: Object.fromEntries(
+      Object.entries(snapshot.pendingRequests).map(([id, request]) => [id, publicRequest(request)])
+    ),
+    debug: snapshot.debug.map(({ payload: _payload, ...entry }) => entry)
+  };
 }
 function publicEvent(event) {
-  if (event.type !== "debug") return event;
-  const { payload: _payload, ...entry } = event.entry;
-  return { ...event, entry };
+  switch (event.type) {
+    case "thread.discovered":
+      return { ...event, thread: publicThread(event.thread, event.provider) };
+    case "activity.started":
+      return { ...event, activity: publicActivity(event.activity) };
+    case "activity.completed":
+      return { ...event, activity: event.activity ? publicActivity(event.activity) : void 0 };
+    case "history.recorded":
+      return { ...event, history: publicHistory(event.history) };
+    case "request.opened":
+      return { ...event, request: publicRequest(event.request) };
+    case "agent.lifecycle": {
+      if (mayExpose(event.provider)) return event;
+      const { message: _message, ...safe } = event;
+      return safe;
+    }
+    case "turn.completed": {
+      if (mayExpose(event.provider)) return event;
+      const { error: _error, ...safe } = event;
+      return safe;
+    }
+    case "debug": {
+      const { payload: _payload, ...entry } = event.entry;
+      return { ...event, entry };
+    }
+    default:
+      return event;
+  }
 }
 
 // apps/server/src/http/request-security.ts
@@ -1500,7 +2985,7 @@ function createObservatoryHttpServer(options) {
 
 // apps/server/src/mock-adapter.ts
 var active = (flags = []) => ({ type: "active", activeFlags: flags });
-function baseThread(id, nickname, role, nativeStatus, parentThreadId, depth = 0) {
+function baseThread(id, nickname, role, nativeStatus2, parentThreadId, depth = 0) {
   const now = Date.now();
   return {
     id,
@@ -1508,7 +2993,7 @@ function baseThread(id, nickname, role, nativeStatus, parentThreadId, depth = 0)
     ...parentThreadId ? { parentThreadId } : {},
     nickname,
     role,
-    nativeStatus,
+    nativeStatus: nativeStatus2,
     createdAt: now - Math.max(1, 7 - depth) * 42e3,
     updatedAt: now,
     cwd: "/projects/codex-agent-observatory",
@@ -1523,7 +3008,45 @@ function baseThread(id, nickname, role, nativeStatus, parentThreadId, depth = 0)
     path: parentThreadId ? `/root/${nickname.toLowerCase()}` : "/root"
   };
 }
+function demoThread({
+  id,
+  sessionId,
+  nickname,
+  role,
+  provider,
+  nativeStatus: nativeStatus2,
+  parentThreadId,
+  depth = 0,
+  model,
+  modelProvider,
+  updatedOffset = 0
+}) {
+  const now = Date.now();
+  return {
+    provider,
+    id,
+    sessionId,
+    ...parentThreadId ? { parentThreadId } : {},
+    nickname,
+    role,
+    nativeStatus: nativeStatus2,
+    createdAt: now - Math.max(1, 8 - depth) * 38e3,
+    updatedAt: now - updatedOffset,
+    cwd: "/projects/agent-observatory-demo",
+    model,
+    modelProvider,
+    reasoningEffort: depth === 0 ? "high" : "medium",
+    observedSkills: depth === 0 ? [] : [role === "teammate" ? "privacy-review" : "release-verification"],
+    observedWorkflows: ["Multi-runtime release"],
+    collaborationMode: provider === "claude" ? "claude-agent-team-beta" : "default",
+    source: { provider, observation: "demo-fixture", contentCaptured: false },
+    evidenceSources: ["mock"],
+    depth,
+    path: parentThreadId ? `/release/${nickname.toLowerCase().replaceAll(" ", "-")}` : `/release/${provider}`
+  };
+}
 var MockCodexAdapter = class {
+  provider = "mock";
   mode = "mock";
   #scenario;
   #threads = /* @__PURE__ */ new Map();
@@ -1531,7 +3054,11 @@ var MockCodexAdapter = class {
   #timers = [];
   #connected = false;
   constructor(scenario = "a") {
-    this.#scenario = scenario === "b" || scenario === "stress" ? scenario : "a";
+    this.#scenario = scenario === "b" || scenario === "demo" || scenario === "stress" ? scenario : "a";
+    if (this.#scenario === "demo") {
+      this.#seedDemo();
+      return;
+    }
     const root = baseThread("mock-main", "Main", "root", active());
     this.#threads.set(root.id, root);
     if (this.#scenario === "b") this.#seedScenarioB();
@@ -1540,6 +3067,7 @@ var MockCodexAdapter = class {
   runtimeInfo() {
     return {
       adapter: "mock",
+      provider: this.provider,
       observatoryVersion: "0.1.0",
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
@@ -1584,6 +3112,7 @@ var MockCodexAdapter = class {
       this.#runScenarioA();
     }
     if (this.#scenario === "b") this.#runScenarioB();
+    if (this.#scenario === "demo") this.#runDemo();
     if (this.#scenario === "stress") this.#runStress();
   }
   async disconnect() {
@@ -1627,7 +3156,8 @@ var MockCodexAdapter = class {
     return () => this.#listeners.delete(listener);
   }
   #emit(event) {
-    for (const listener of this.#listeners) listener(event);
+    const tagged = { ...event, provider: event.provider ?? this.provider };
+    for (const listener of this.#listeners) listener(tagged);
   }
   #schedule(delay, action) {
     this.#timers.push(setTimeout(() => this.#connected && action(), delay));
@@ -1747,6 +3277,179 @@ var MockCodexAdapter = class {
       () => this.#activity("mock-reviewer", "review-error", "error", "Review failed", "Malformed tool response")
     );
   }
+  #seedDemo() {
+    const threads = [
+      demoThread({
+        provider: "codex",
+        id: "codex:demo-orchestrator",
+        sessionId: "codex:release-session",
+        nickname: "Release Orchestrator",
+        role: "root",
+        nativeStatus: active(),
+        model: "gpt-5.6-sol",
+        modelProvider: "openai"
+      }),
+      demoThread({
+        provider: "codex",
+        id: "codex:demo-builder",
+        sessionId: "codex:release-session",
+        nickname: "Runtime Builder",
+        role: "implementation",
+        nativeStatus: active(),
+        parentThreadId: "codex:demo-orchestrator",
+        depth: 1,
+        model: "gpt-5.6-terra",
+        modelProvider: "openai",
+        updatedOffset: 4e3
+      }),
+      demoThread({
+        provider: "codex",
+        id: "codex:demo-tester",
+        sessionId: "codex:release-session",
+        nickname: "Browser Tester",
+        role: "testing",
+        nativeStatus: active(["waitingOnApproval"]),
+        parentThreadId: "codex:demo-orchestrator",
+        depth: 1,
+        model: "gpt-5.6-terra",
+        modelProvider: "openai",
+        updatedOffset: 7e3
+      }),
+      demoThread({
+        provider: "claude",
+        id: "claude:demo-lead",
+        sessionId: "claude:team-session",
+        nickname: "Claude Team Lead",
+        role: "teamLead",
+        nativeStatus: active(),
+        model: "claude-opus-4-1",
+        modelProvider: "anthropic",
+        updatedOffset: 1500
+      }),
+      demoThread({
+        provider: "claude",
+        id: "claude:demo-reviewer",
+        sessionId: "claude:team-session",
+        nickname: "Privacy Reviewer",
+        role: "teammate",
+        nativeStatus: { type: "idle" },
+        parentThreadId: "claude:demo-lead",
+        depth: 1,
+        model: "claude-sonnet-4",
+        modelProvider: "anthropic",
+        updatedOffset: 5e3
+      }),
+      demoThread({
+        provider: "claude",
+        id: "claude:demo-researcher",
+        sessionId: "claude:team-session",
+        nickname: "Evidence Researcher",
+        role: "subagent",
+        nativeStatus: { type: "idle" },
+        parentThreadId: "claude:demo-lead",
+        depth: 1,
+        model: "claude-sonnet-4",
+        modelProvider: "anthropic",
+        updatedOffset: 9e3
+      })
+    ];
+    for (const thread of threads) this.#threads.set(thread.id, thread);
+  }
+  #runDemo() {
+    const now = Date.now();
+    this.#emit({
+      type: "provider.connection.changed",
+      provider: "codex",
+      at: now,
+      connection: { phase: "connected", attempt: 0, message: "Codex demo observation active" }
+    });
+    this.#emit({
+      type: "provider.connection.changed",
+      provider: "claude",
+      at: now,
+      connection: { phase: "connected", attempt: 0, message: "Claude demo observation active" }
+    });
+    this.#history({
+      id: "demo-request",
+      kind: "request",
+      actor: { type: "human" },
+      recipients: [{ type: "agent", id: "codex:demo-orchestrator" }],
+      summary: "Multi-provider release requested",
+      content: "Coordinate implementation and verification across Codex and Claude Code.",
+      status: "completed",
+      occurredAt: now,
+      source: "mock"
+    });
+    this.#history({
+      id: "demo-plan",
+      kind: "decision",
+      actor: { type: "agent", id: "codex:demo-orchestrator" },
+      summary: "Release plan confirmed",
+      content: "Build the runtime, review privacy, then complete browser verification.",
+      status: "completed",
+      occurredAt: now + 1,
+      source: "mock"
+    });
+    this.#history({
+      id: "demo-provider-handoff",
+      kind: "handoff",
+      relationKind: "handoff",
+      actor: { type: "agent", id: "codex:demo-orchestrator" },
+      recipients: [{ type: "agent", id: "claude:demo-lead" }],
+      summary: "Claude review requested",
+      content: "Validate compatibility evidence and privacy boundaries.",
+      status: "sent",
+      occurredAt: now + 2,
+      source: "mock"
+    });
+    this.#history({
+      id: "demo-team-task",
+      kind: "handoff",
+      relationKind: "task",
+      actor: { type: "agent", id: "claude:demo-lead" },
+      recipients: [{ type: "agent", id: "claude:demo-reviewer" }],
+      summary: "Privacy review assigned",
+      content: "Confirm metadata-only payload behavior.",
+      status: "sent",
+      occurredAt: now + 3,
+      source: "mock"
+    });
+    this.#history({
+      id: "demo-peer-message",
+      kind: "handoff",
+      relationKind: "message",
+      actor: { type: "agent", id: "claude:demo-reviewer" },
+      recipients: [{ type: "agent", id: "codex:demo-builder" }],
+      summary: "Review evidence shared",
+      content: "Raw provider content remains outside the public payload.",
+      status: "sent",
+      occurredAt: now + 4,
+      source: "mock"
+    });
+    this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout");
+    this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts");
+    this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence");
+    this.#activity("claude:demo-reviewer", "demo-privacy", "test", "Checking privacy boundary", "provider content redaction");
+    this.#emit({
+      type: "request.opened",
+      at: now + 5,
+      request: {
+        id: "demo-browser-approval",
+        agentId: "codex:demo-tester",
+        reason: "approval",
+        title: "Browser verification approval",
+        detail: "Run the deterministic demo capture",
+        openedAt: now + 5,
+        evidenceSource: "mock"
+      }
+    });
+    this.#emit({
+      type: "agent.lifecycle",
+      at: now + 6,
+      threadId: "claude:demo-researcher",
+      status: "completed"
+    });
+  }
   #seedStress() {
     for (let index = 1; index <= 35; index += 1) {
       const parent = index <= 6 ? "mock-main" : `mock-agent-${(index - 1) % 6 + 1}`;
@@ -1777,24 +3480,24 @@ var MockCodexAdapter = class {
 
 // apps/server/src/shared-state-adapter.ts
 import {
-  closeSync,
+  closeSync as closeSync2,
   existsSync as existsSync2,
-  fstatSync,
-  openSync,
-  readSync,
-  readdirSync as readdirSync2,
-  statSync,
+  fstatSync as fstatSync2,
+  openSync as openSync2,
+  readSync as readSync2,
+  readdirSync as readdirSync4,
+  statSync as statSync2,
   watch
 } from "node:fs";
-import { homedir } from "node:os";
-import { join as join2 } from "node:path";
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { homedir as homedir2 } from "node:os";
+import { join as join4 } from "node:path";
+import { spawnSync as spawnSync4 } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 
 // apps/server/src/process-discovery.ts
-import { readFileSync, readdirSync, readlinkSync } from "node:fs";
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { basename, join, win32 } from "node:path";
+import { readFileSync as readFileSync3, readdirSync as readdirSync3, readlinkSync as readlinkSync2 } from "node:fs";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { basename as basename3, join as join3, win32 } from "node:path";
 var NON_INTERACTIVE_COMMANDS = /* @__PURE__ */ new Set([
   "agents",
   "app-server",
@@ -1854,7 +3557,7 @@ function splitProcessCommandLine(commandLine) {
 function codexInvocation(commandLine, platform) {
   const tokens = splitProcessCommandLine(commandLine);
   const codexIndex = tokens.findIndex((token) => {
-    const name = (platform === "win32" ? win32.basename(token) : basename(token)).toLowerCase();
+    const name = (platform === "win32" ? win32.basename(token) : basename3(token)).toLowerCase();
     return name === "codex" || name === "codex.exe";
   });
   if (codexIndex === -1) return void 0;
@@ -1887,15 +3590,15 @@ function findInteractiveCodexCwds(procRoot = "/proc") {
   const result = /* @__PURE__ */ new Map();
   let entries;
   try {
-    entries = readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry));
+    entries = readdirSync3(procRoot).filter((entry) => /^\d+$/.test(entry));
   } catch {
     return result;
   }
   for (const pid of entries) {
     try {
-      const command = readFileSync(join(procRoot, pid, "cmdline"), "utf8").split("\0").filter(Boolean);
+      const command = readFileSync3(join3(procRoot, pid, "cmdline"), "utf8").split("\0").filter(Boolean);
       if (!codexInvocation(command.map((value) => JSON.stringify(value)).join(" "), "linux")) continue;
-      const cwd = readlinkSync(join(procRoot, pid, "cwd"));
+      const cwd = readlinkSync2(join3(procRoot, pid, "cwd"));
       if (cwd) increment(result, cwd);
     } catch {
     }
@@ -1960,7 +3663,7 @@ function parseWindowsProcessList(output) {
   };
 }
 function discoverMacProcesses() {
-  const ps = spawnSync2("ps", ["-axo", "pid=,command="], {
+  const ps = spawnSync3("ps", ["-axo", "pid=,command="], {
     encoding: "utf8",
     timeout: 5e3,
     maxBuffer: 4 * 1024 * 1024
@@ -1978,7 +3681,7 @@ function discoverMacProcesses() {
   if (pids.length === 0) {
     return { cwdCounts: /* @__PURE__ */ new Map(), processCount: 0, exact: true, source: "macos-ps-lsof" };
   }
-  const lsof = spawnSync2("lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fn"], {
+  const lsof = spawnSync3("lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fn"], {
     encoding: "utf8",
     timeout: 5e3,
     maxBuffer: 4 * 1024 * 1024
@@ -2002,7 +3705,7 @@ function discoverWindowsProcesses() {
     `Where-Object { $_.Name -ieq 'codex.exe' -or $_.CommandLine -match '(?:^|[\\\\/])codex(?:\\.exe)?(?:"|\\s|$)' } |`,
     "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
   ].join(" ");
-  const powershell = spawnSync2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+  const powershell = spawnSync3("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     encoding: "utf8",
     timeout: 8e3,
     maxBuffer: 4 * 1024 * 1024
@@ -2073,12 +3776,12 @@ var PROCESS_DISCOVERY_CACHE_MS = 2e3;
 var ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024;
 var SEEN_ACTIVITY_LIMIT = 3e3;
 var SEEN_HISTORY_LIMIT = 5e3;
-function numberValue2(value) {
+function numberValue3(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "bigint") return Number(value);
   return void 0;
 }
-function stringValue2(value) {
+function stringValue4(value) {
   return typeof value === "string" && value.length > 0 ? value : void 0;
 }
 function jsonRecord(line) {
@@ -2089,10 +3792,10 @@ function jsonRecord(line) {
     return void 0;
   }
 }
-function recordValue(value) {
+function recordValue3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
-function timestampValue(value) {
+function timestampValue3(value) {
   if (typeof value !== "string") return void 0;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : void 0;
@@ -2126,7 +3829,7 @@ function rolloutMessageText(payload) {
   const direct = boundedHistoryText(payload.text);
   if (direct) return direct;
   if (!Array.isArray(payload.content)) return void 0;
-  const parts = payload.content.map((entry) => recordValue(entry)).map((entry) => boundedHistoryText(entry?.text ?? entry?.input_text ?? entry?.output_text)).filter((entry) => Boolean(entry));
+  const parts = payload.content.map((entry) => recordValue3(entry)).map((entry) => boundedHistoryText(entry?.text ?? entry?.input_text ?? entry?.output_text)).filter((entry) => Boolean(entry));
   return boundedHistoryText(parts.join("\n"));
 }
 function collaborationHistory(name, input, callId, threadId, at) {
@@ -2139,6 +3842,7 @@ function collaborationHistory(name, input, callId, threadId, at) {
   return {
     id: `activity:${callId}`,
     kind: "handoff",
+    relationKind: name === "spawn_agent" ? "spawn" : name === "followup_task" ? "task" : "message",
     actor: { type: "agent", id: threadId },
     ...recipient ? { recipients: [recipient] } : {},
     summary: name === "spawn_agent" ? "Delegated work" : name === "followup_task" ? "Assigned follow-up" : "Sent message",
@@ -2152,7 +3856,7 @@ function collaborationHistory(name, input, callId, threadId, at) {
 function decisionHistory(name, input, callId, threadId, at) {
   if (!["update_plan", "create_goal"].includes(name)) return void 0;
   const parsed = jsonRecord(input) ?? {};
-  const plan = Array.isArray(parsed.plan) ? parsed.plan.map((item) => recordValue(item)).map((item) => boundedHistoryText(item?.step)).filter((item) => Boolean(item)).map((step, index) => `${index + 1}. ${step}`).join("\n") : void 0;
+  const plan = Array.isArray(parsed.plan) ? parsed.plan.map((item) => recordValue3(item)).map((item) => boundedHistoryText(item?.step)).filter((item) => Boolean(item)).map((step, index) => `${index + 1}. ${step}`).join("\n") : void 0;
   const content = boundedHistoryText(parsed.explanation) ?? boundedHistoryText(parsed.objective) ?? boundedHistoryText(plan);
   return {
     id: `activity:${callId}`,
@@ -2230,14 +3934,14 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
     if (!line.trim()) continue;
     const envelope = jsonRecord(line);
     if (!envelope) continue;
-    const at = timestampValue(envelope.timestamp);
+    const at = timestampValue3(envelope.timestamp);
     if (at !== void 0) lastEventAt = Math.max(lastEventAt ?? at, at);
-    const payload = recordValue(envelope.payload);
+    const payload = recordValue3(envelope.payload);
     if (!payload) continue;
     if (envelope.type === "turn_context") {
       if (typeof payload.model === "string" && payload.model.length > 0) model = payload.model;
       if (typeof payload.effort === "string" && payload.effort.length > 0) reasoningEffort = payload.effort;
-      const mode = recordValue(payload.collaboration_mode);
+      const mode = recordValue3(payload.collaboration_mode);
       if (typeof mode?.mode === "string" && mode.mode.length > 0) collaborationMode = mode.mode;
       if (collaborationMode === "plan") observedWorkflows.add("Planning");
       continue;
@@ -2349,27 +4053,27 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
   const activeRootWork = isRoot && processActive && (workItemAt ?? 0) > latestTerminalAt;
   const isWorking = explicitWorking || activeRootWork;
   const waitingOnUserInput = [...openCalls.values()].some((activity) => activity.detail === "request_user_input");
-  let nativeStatus;
+  let nativeStatus2;
   let lifecycle;
   if (isWorking) {
-    nativeStatus = {
+    nativeStatus2 = {
       type: "active",
       activeFlags: waitingOnUserInput ? ["waitingOnUserInput"] : []
     };
     lifecycle = "running";
   } else if (interruptedAt !== void 0 && interruptedAt >= (taskCompletedAt ?? 0)) {
-    nativeStatus = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
+    nativeStatus2 = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
     lifecycle = "interrupted";
   } else if (taskCompletedAt !== void 0) {
-    nativeStatus = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
+    nativeStatus2 = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
     if (!isRoot) lifecycle = "completed";
   } else {
-    nativeStatus = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
+    nativeStatus2 = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
   }
   const activities = [...completedActivities, ...openCalls.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-ACTIVITY_LIMIT_PER_THREAD);
   const history = [...completedHistory, ...openHistory.values()].sort((a, b) => a.occurredAt - b.occurredAt).slice(-HISTORY_LIMIT_PER_THREAD);
   return {
-    nativeStatus,
+    nativeStatus: nativeStatus2,
     ...lifecycle ? { lifecycle } : {},
     ...lastEventAt ? { lastEventAt } : {},
     ...model ? { model } : {},
@@ -2382,53 +4086,54 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
   };
 }
 function readRolloutTail(path2) {
-  const fd = openSync(path2, "r");
+  const fd = openSync2(path2, "r");
   try {
-    const size = fstatSync(fd).size;
+    const size = fstatSync2(fd).size;
     const start = Math.max(0, size - ROLLOUT_TAIL_BYTES);
     const buffer = Buffer.alloc(size - start);
-    readSync(fd, buffer, 0, buffer.length, start);
+    readSync2(fd, buffer, 0, buffer.length, start);
     const text = buffer.toString("utf8");
     if (start === 0) return text;
     const firstNewline = text.indexOf("\n");
     return firstNewline === -1 ? "" : text.slice(firstNewline + 1);
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 function latestVersionedDatabase(codexHome, prefix) {
-  const matches = readdirSync2(codexHome).filter((name) => new RegExp(`^${prefix}_[0-9]+\\.sqlite$`).test(name)).sort((a, b) => {
+  const matches = readdirSync4(codexHome).filter((name) => new RegExp(`^${prefix}_[0-9]+\\.sqlite$`).test(name)).sort((a, b) => {
     const aVersion = Number(a.match(/_([0-9]+)\.sqlite$/)?.[1] ?? 0);
     const bVersion = Number(b.match(/_([0-9]+)\.sqlite$/)?.[1] ?? 0);
     return bVersion - aVersion;
   });
-  return matches[0] ? join2(codexHome, matches[0]) : void 0;
+  return matches[0] ? join4(codexHome, matches[0]) : void 0;
 }
 function rowSnapshot(row, rollout) {
-  const id = stringValue2(row.id);
+  const id = stringValue4(row.id);
   if (!id) return void 0;
-  const createdAt = numberValue2(row.created_at_ms) ?? ((numberValue2(row.created_at) ?? 0) * 1e3 || void 0);
-  const updatedAt = rollout.lastEventAt ?? numberValue2(row.updated_at_ms) ?? ((numberValue2(row.updated_at) ?? 0) * 1e3 || void 0);
+  const createdAt = numberValue3(row.created_at_ms) ?? ((numberValue3(row.created_at) ?? 0) * 1e3 || void 0);
+  const updatedAt = rollout.lastEventAt ?? numberValue3(row.updated_at_ms) ?? ((numberValue3(row.updated_at) ?? 0) * 1e3 || void 0);
   return {
     id,
-    ...stringValue2(row.parent_thread_id) ? { parentThreadId: stringValue2(row.parent_thread_id) } : {},
-    ...stringValue2(row.agent_nickname) ? { nickname: stringValue2(row.agent_nickname) } : {},
-    ...stringValue2(row.agent_role) ? { role: stringValue2(row.agent_role) } : {},
+    ...stringValue4(row.parent_thread_id) ? { parentThreadId: stringValue4(row.parent_thread_id) } : {},
+    ...stringValue4(row.agent_nickname) ? { nickname: stringValue4(row.agent_nickname) } : {},
+    ...stringValue4(row.agent_role) ? { role: stringValue4(row.agent_role) } : {},
     nativeStatus: rollout.nativeStatus,
     ...createdAt ? { createdAt } : {},
     ...updatedAt ? { updatedAt } : {},
-    ...stringValue2(row.cwd) ? { cwd: stringValue2(row.cwd) } : {},
+    ...stringValue4(row.cwd) ? { cwd: stringValue4(row.cwd) } : {},
     ...rollout.model ? { model: rollout.model } : {},
-    ...stringValue2(row.model_provider) ? { modelProvider: stringValue2(row.model_provider) } : {},
+    ...stringValue4(row.model_provider) ? { modelProvider: stringValue4(row.model_provider) } : {},
     ...rollout.reasoningEffort ? { reasoningEffort: rollout.reasoningEffort } : {},
     observedSkills: rollout.observedSkills,
     observedWorkflows: rollout.observedWorkflows,
     ...rollout.collaborationMode ? { collaborationMode: rollout.collaborationMode } : {},
-    ...stringValue2(row.thread_source) ? { source: row.thread_source } : {},
-    ...stringValue2(row.agent_path) ? { path: stringValue2(row.agent_path) } : {}
+    ...stringValue4(row.thread_source) ? { source: row.thread_source } : {},
+    ...stringValue4(row.agent_path) ? { path: stringValue4(row.agent_path) } : {}
   };
 }
 var SharedStateCodexAdapter = class {
+  provider = "codex";
   mode = "codex";
   #listeners = /* @__PURE__ */ new Set();
   #db;
@@ -2453,6 +4158,7 @@ var SharedStateCodexAdapter = class {
   runtimeInfo() {
     return {
       adapter: "codex",
+      provider: this.provider,
       observatoryVersion: "0.1.0",
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
@@ -2479,9 +4185,9 @@ var SharedStateCodexAdapter = class {
       at: Date.now(),
       connection: { phase: "connecting", attempt: 0, message: "Connecting to shared Codex state" }
     });
-    const version = spawnSync3("codex", ["--version"], { encoding: "utf8" });
+    const version = spawnSync4("codex", ["--version"], { encoding: "utf8" });
     this.#codexVersion = version.stdout.trim().replace(/^codex-cli\s+/, "") || "unknown";
-    const codexHome = process.env.CODEX_HOME ?? join2(homedir(), ".codex");
+    const codexHome = process.env.CODEX_HOME ?? join4(homedir2(), ".codex");
     const stateDbPath = latestVersionedDatabase(codexHome, "state");
     if (!stateDbPath) throw new Error(`Codex state database was not found in ${codexHome}`);
     this.#db = new DatabaseSync(stateDbPath, { readOnly: true });
@@ -2551,7 +4257,7 @@ var SharedStateCodexAdapter = class {
     } catch (error) {
       this.#debug("Unable to watch Codex state database", error);
     }
-    const sessions = join2(codexHome, "sessions");
+    const sessions = join4(codexHome, "sessions");
     if (existsSync2(sessions)) {
       try {
         this.#watchers.push(watch(sessions, { recursive: true }, (_event, file) => {
@@ -2594,12 +4300,12 @@ var SharedStateCodexAdapter = class {
       }
       const configuredCwd = process.env.OBSERVATORY_CWD ?? "all";
       const rootOverride = process.env.OBSERVATORY_ROOT_THREAD_ID;
-      const roots = rows.filter((row) => !stringValue2(row.parent_thread_id));
+      const roots = rows.filter((row) => !stringValue4(row.parent_thread_id));
       const rootCandidates = roots.flatMap((row) => {
-        const id = stringValue2(row.id);
+        const id = stringValue4(row.id);
         if (!id) return [];
-        const cwd = stringValue2(row.cwd);
-        const updatedAt = numberValue2(row.updated_at_ms);
+        const cwd = stringValue4(row.cwd);
+        const updatedAt = numberValue3(row.updated_at_ms);
         return [{
           id,
           ...cwd ? { cwd } : {},
@@ -2617,8 +4323,8 @@ var SharedStateCodexAdapter = class {
       while (changed) {
         changed = false;
         for (const row of rows) {
-          const id = stringValue2(row.id);
-          const parentId = stringValue2(row.parent_thread_id);
+          const id = stringValue4(row.id);
+          const parentId = stringValue4(row.parent_thread_id);
           if (id && parentId && selected.has(parentId) && !selected.has(id)) {
             selected.add(id);
             changed = true;
@@ -2627,13 +4333,13 @@ var SharedStateCodexAdapter = class {
       }
       const next = /* @__PURE__ */ new Map();
       for (const row of rows) {
-        const id = stringValue2(row.id);
+        const id = stringValue4(row.id);
         if (!id || !selected.has(id)) continue;
-        const rolloutPath = stringValue2(row.rollout_path);
+        const rolloutPath = stringValue4(row.rollout_path);
         if (!rolloutPath || !existsSync2(rolloutPath)) continue;
-        const isRoot = !stringValue2(row.parent_thread_id);
+        const isRoot = !stringValue4(row.parent_thread_id);
         const processActive = isRoot && selectedRoots.has(id);
-        const file = statSync(rolloutPath);
+        const file = statSync2(rolloutPath);
         const cached = this.#rolloutCache.get(rolloutPath);
         const rollout = cached && cached.size === file.size && cached.mtimeMs === file.mtimeMs && cached.processActive === processActive ? cached.state : parseRolloutState(
           readRolloutTail(rolloutPath),
@@ -2731,7 +4437,8 @@ var SharedStateCodexAdapter = class {
     }
   }
   #emit(event) {
-    for (const listener of this.#listeners) listener(event);
+    const tagged = { ...event, provider: event.provider ?? this.provider };
+    for (const listener of this.#listeners) listener(tagged);
   }
   #debug(summary, payload) {
     this.#emit({
@@ -2753,7 +4460,22 @@ var SharedStateCodexAdapter = class {
 var accessToken = consumeAccessToken();
 var port = Number(process.env.OBSERVATORY_PORT ?? 4317);
 var realTransport = process.env.OBSERVATORY_CODEX_TRANSPORT ?? "shared";
-var adapter = process.env.OBSERVATORY_ADAPTER === "codex" ? realTransport === "shared" ? new SharedStateCodexAdapter() : new RealCodexAdapter() : new MockCodexAdapter(process.env.OBSERVATORY_SCENARIO ?? "a");
+var adapterMode = process.env.OBSERVATORY_ADAPTER ?? "mock";
+var requestedProviders = (process.env.OBSERVATORY_PROVIDERS ?? "codex").split(",").map((provider) => provider.trim()).filter(Boolean);
+function codexAdapter() {
+  return realTransport === "shared" ? new SharedStateCodexAdapter() : new RealCodexAdapter();
+}
+function realAdapter() {
+  const providers = Array.from(new Set(requestedProviders));
+  if (providers.length === 0) throw new Error("At least one runtime provider is required");
+  const adapters = providers.map((provider) => {
+    if (provider === "codex") return codexAdapter();
+    if (provider === "claude") return new ClaudeCodeAdapter();
+    throw new Error(`Unsupported runtime provider: ${provider}`);
+  });
+  return adapters.length === 1 ? adapters[0] : new CompositeRuntimeAdapter(adapters);
+}
+var adapter = adapterMode === "mock" ? new MockCodexAdapter(process.env.OBSERVATORY_SCENARIO ?? "a") : realAdapter();
 var webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
 var runningFromSource = fileURLToPath(import.meta.url).includes(`${sep}src${sep}`);
 var webPort = Number(process.env.OBSERVATORY_WEB_PORT ?? 4318);
@@ -2761,7 +4483,7 @@ var devWebOrigins = runningFromSource ? [`http://127.0.0.1:${webPort}`, `http://
 var { server, connectAdapter } = createObservatoryHttpServer({ accessToken, adapter, webDist, devWebOrigins });
 server.listen(port, "127.0.0.1", () => {
   const bootstrapOrigin = `http://127.0.0.1:${port}`;
-  console.log(`Codex Agent Observatory server: ${bootstrapOrigin}/?token=${encodeURIComponent(accessToken)}`);
+  console.log(`Agent Observatory server: ${bootstrapOrigin}/?token=${encodeURIComponent(accessToken)}`);
   console.log(`Adapter: ${adapter.mode}`);
 });
 void connectAdapter().catch(() => void 0);

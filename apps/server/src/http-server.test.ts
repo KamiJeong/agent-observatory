@@ -16,11 +16,13 @@ import {
   isPathWithin,
   OBSERVATORY_SESSION_COOKIE,
 } from "./http-server.ts";
+import { publicEvent } from "./http/public-payload.ts";
 
 const ACCESS_TOKEN = "test-access-token-with-enough-entropy";
 const SESSION_COOKIE = `${OBSERVATORY_SESSION_COOKIE}=${encodeURIComponent(ACCESS_TOKEN)}`;
 
 class TestAdapter implements CodexAdapter {
+  readonly provider = "mock" as const;
   readonly mode = "mock" as const;
   connectCalls = 0;
   #listeners = new Set<(event: CodexRuntimeEvent) => void>();
@@ -259,6 +261,93 @@ describe("Observatory HTTP trust boundary", () => {
     });
     const snapshot = await response.json() as { debug: Array<Record<string, unknown>> };
     expect(snapshot.debug[0]).not.toHaveProperty("payload");
+  });
+
+  it("redacts provider content and unsafe metadata by default", async () => {
+    const at = Date.now();
+    adapter.emit({
+      type: "thread.discovered",
+      provider: "claude",
+      at,
+      thread: {
+        provider: "claude",
+        id: "claude:session",
+        nativeStatus: { type: "active", activeFlags: [] },
+        source: { agentKind: "subagent", prompt: "secret delegated prompt" },
+      },
+    });
+    adapter.emit({
+      type: "activity.started",
+      provider: "claude",
+      at,
+      activity: {
+        provider: "claude",
+        id: "claude:activity",
+        agentId: "claude:session",
+        kind: "command",
+        title: "Running command",
+        detail: "secret command",
+        startedAt: at,
+        metadata: { nativeTool: "Bash", toolInput: "secret input" },
+      },
+    });
+    adapter.emit({
+      type: "history.recorded",
+      provider: "claude",
+      at,
+      history: {
+        provider: "claude",
+        id: "claude:history",
+        kind: "request",
+        actor: { type: "human" },
+        summary: "User request",
+        content: "secret prompt",
+        occurredAt: at,
+        source: "transcript",
+      },
+    });
+    adapter.emit({
+      type: "request.opened",
+      provider: "claude",
+      at,
+      request: {
+        provider: "claude",
+        id: "claude:request",
+        agentId: "claude:session",
+        reason: "userInput",
+        title: "Waiting for input",
+        detail: "secret question",
+        openedAt: at,
+      },
+    });
+
+    const response = await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { cookie: SESSION_COOKIE },
+    });
+    const snapshot = await response.json() as {
+      agents: Record<string, Record<string, unknown>>;
+      activities: Array<Record<string, unknown>>;
+      history: Array<Record<string, unknown>>;
+      pendingRequests: Record<string, Record<string, unknown>>;
+    };
+    expect(snapshot.agents["claude:session"]).not.toHaveProperty("source");
+    expect(snapshot.activities[0]).not.toHaveProperty("detail");
+    expect(snapshot.activities[0]?.metadata).toEqual({ nativeTool: "Bash" });
+    expect(snapshot.history[0]).not.toHaveProperty("content");
+    expect(snapshot.pendingRequests["claude:request"]).not.toHaveProperty("detail");
+    expect(publicEvent({
+      type: "thread.discovered",
+      provider: "claude",
+      at,
+      thread: {
+        provider: "claude",
+        id: "claude:child",
+        nativeStatus: { type: "notLoaded" },
+        source: { prompt: "secret delegated prompt" },
+      },
+    })).toEqual(expect.objectContaining({
+      thread: expect.not.objectContaining({ source: expect.anything() }),
+    }));
   });
 });
 

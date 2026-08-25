@@ -55,6 +55,48 @@ export function roleDescription(role?: string): string {
 export type TimelineFilter = "all" | "agent" | "tool" | "file" | "command" | "error";
 export type AgentContextFilter = "all" | "skill" | "workflow";
 
+type ProviderAwareAgent = AgentNode & { provider?: string };
+
+export function normalizeProvider(value?: string): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized === "anthropic" || normalized.includes("claude")) return "claude";
+  if (normalized === "openai" || normalized.includes("codex")) return "codex";
+  return normalized;
+}
+
+export function agentProvider(agent: AgentNode, fallback?: string): string {
+  const declared = normalizeProvider((agent as ProviderAwareAgent).provider);
+  if (declared) return declared;
+  const modelProvider = normalizeProvider(agent.modelProvider);
+  if (modelProvider) return modelProvider;
+  const model = agent.model?.toLowerCase();
+  if (model?.startsWith("claude")) return "claude";
+  if (model && /^(gpt|o\d|codex)/.test(model)) return "codex";
+  const namespacedId = normalizeProvider(agent.id.split(":", 1)[0]);
+  if (namespacedId === "codex" || namespacedId === "claude") return namespacedId;
+  return normalizeProvider(fallback) ?? "unknown";
+}
+
+export function providerLabel(provider: string): string {
+  const normalized = normalizeProvider(provider) ?? "unknown";
+  if (normalized === "codex") return "Codex";
+  if (normalized === "claude") return "Claude";
+  if (normalized === "mock") return "Mock";
+  if (normalized === "unknown") return "Unknown";
+  return normalized[0]?.toUpperCase() + normalized.slice(1);
+}
+
+export function ProviderBadge({ provider, compact = false }: { provider: string; compact?: boolean }) {
+  const normalized = normalizeProvider(provider) ?? "unknown";
+  const label = providerLabel(normalized);
+  return (
+    <span className={`provider-badge provider-badge--${normalized}`} data-provider={normalized} data-compact={compact || undefined} aria-label={`Provider: ${label}`}>
+      {compact ? null : label}
+    </span>
+  );
+}
+
 export function useNow(interval = 1_000): number {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {

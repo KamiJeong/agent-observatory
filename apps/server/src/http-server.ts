@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import type { CodexAdapter } from "@observatory/core";
+import type { AgentRuntimeAdapter } from "@observatory/core";
 import { ObservatoryStore } from "@observatory/core";
 import { handleApiRequest } from "./http/api-router.ts";
 import { publicEvent, publicSnapshot } from "./http/public-payload.ts";
@@ -14,7 +14,7 @@ export { isPathWithin, OBSERVATORY_SESSION_COOKIE };
 
 export interface ObservatoryHttpServerOptions {
   accessToken: string;
-  adapter: CodexAdapter;
+  adapter: AgentRuntimeAdapter;
   webDist: string;
   devWebOrigins?: readonly string[];
   retryWindowMs?: number;

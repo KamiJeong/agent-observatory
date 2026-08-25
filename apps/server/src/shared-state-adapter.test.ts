@@ -130,6 +130,7 @@ describe("shared Codex state compatibility", () => {
       }),
       expect.objectContaining({
         kind: "handoff",
+        relationKind: "message",
         actor: { type: "agent", id: "root-1" },
         recipients: [{ type: "agent", id: "reviewer" }],
         content: "Check the cookie boundary",

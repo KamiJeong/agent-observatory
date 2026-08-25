@@ -75,23 +75,83 @@ describe("status projection", () => {
       collaborationMode: "default",
     });
   });
+
+  it("keeps single-provider health separate from the aggregate connection", () => {
+    const state = reduceEvent(createInitialState({ ...runtime, adapter: "claude", provider: "claude" }, 1), {
+      type: "connection.changed",
+      provider: "claude",
+      at: 2,
+      connection: { phase: "connected", attempt: 0, message: "Observing local sessions" },
+    });
+
+    expect(state.connection.phase).toBe("connected");
+    expect(state.providerConnections.claude).toEqual(state.connection);
+  });
 });
 
 describe("graph construction", () => {
   it("builds parent-child edges and treats missing parents as roots", () => {
     const graph = buildGraph({
       root: {
+        provider: "mock",
         id: "root", threadId: "root", status: "working", waitingReasons: [], recentActivityIds: [], children: ["child"],
       },
       child: {
+        provider: "mock",
         id: "child", threadId: "child", parentId: "root", status: "idle", waitingReasons: [], recentActivityIds: [], children: [],
       },
       orphan: {
+        provider: "mock",
         id: "orphan", threadId: "orphan", parentId: "missing", status: "unknown", waitingReasons: [], recentActivityIds: [], children: [],
       },
     });
     expect(graph.roots).toEqual(["root", "orphan"]);
-    expect(graph.edges).toEqual([{ id: "root->child", source: "root", target: "child" }]);
+    expect(graph.edges).toEqual([{
+      id: "root->child",
+      source: "root",
+      target: "child",
+      kind: "spawn",
+      evidenceSource: "derived",
+    }]);
+  });
+
+  it("preserves evidence for mixed agent relations without changing spawn roots", () => {
+    const agents = {
+      lead: {
+        provider: "claude", id: "lead", threadId: "lead", status: "working" as const,
+        waitingReasons: [], recentActivityIds: [], children: ["worker"], evidenceSources: ["hook" as const],
+      },
+      worker: {
+        provider: "claude", id: "worker", threadId: "worker", parentId: "lead", status: "working" as const,
+        waitingReasons: [], recentActivityIds: [], children: [], evidenceSources: ["transcript" as const],
+      },
+      peer: {
+        provider: "codex", id: "peer", threadId: "peer", status: "idle" as const,
+        waitingReasons: [], recentActivityIds: [], children: [],
+      },
+    };
+    const graph = buildGraph(agents, [
+      {
+        id: "message-1", kind: "handoff", relationKind: "message", actor: { type: "agent", id: "worker" },
+        recipients: [{ type: "agent", id: "peer" }], summary: "Asked for review", occurredAt: 5, source: "protocol",
+      },
+      {
+        id: "task-1", kind: "handoff", relationKind: "task", actor: { type: "agent", id: "peer" },
+        recipients: [{ type: "agent", id: "worker" }], summary: "Assigned verification", occurredAt: 4, source: "hook",
+      },
+      {
+        id: "self-message", kind: "handoff", relationKind: "message", actor: { type: "agent", id: "peer" },
+        recipients: [{ type: "agent", id: "peer" }], summary: "Recorded note", occurredAt: 3, source: "otel",
+      },
+    ]);
+
+    expect(graph.roots).toEqual(["lead", "peer"]);
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "lead", target: "worker", kind: "spawn", evidenceSource: "transcript" }),
+      expect.objectContaining({ source: "worker", target: "peer", kind: "message", evidenceSource: "protocol" }),
+      expect.objectContaining({ source: "peer", target: "worker", kind: "task", evidenceSource: "hook" }),
+      expect.objectContaining({ source: "peer", target: "peer", kind: "message", evidenceSource: "otel" }),
+    ]));
   });
 });
 

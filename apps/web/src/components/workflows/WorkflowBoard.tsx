@@ -2,11 +2,13 @@ import { useMemo, useState, type CSSProperties } from "react";
 import type { AgentNode, AgentRuntimeStatus, ObservatorySnapshot } from "@observatory/core";
 import {
   agentRuntimeLabel,
+  agentProvider,
   formatTime,
   roleColor,
   shortId,
   STATUS,
   StatusBadge,
+  ProviderBadge,
 } from "../shared/presentation.tsx";
 
 const WORKFLOW_WITHOUT_EVIDENCE = "__without-workflow-evidence__";
@@ -149,7 +151,7 @@ export function WorkflowBoard({
                       className={`workflow-card workflow-card--${agent.status}`}
                       data-selected={selectedId === agent.id || undefined}
                       onClick={() => onSelect(agent.id)}
-                      aria-label={`Position ${agentIndex + 1}, ${name}, ${STATUS[agent.status].label}, ${lane.label} workflow lane`}
+                      aria-label={`Position ${agentIndex + 1}, ${name}, ${STATUS[agent.status].label}, ${lane.label} workflow lane. Provider ${agentProvider(agent, snapshot.runtime.adapter)}.`}
                       aria-pressed={selectedId === agent.id}
                       style={{ "--agent-role-color": roleColor(agent.role) } as CSSProperties}
                     >
@@ -158,6 +160,7 @@ export function WorkflowBoard({
                           <span className="workflow-card__position" aria-label={`Observed position ${agentIndex + 1}`}>
                             {String(agentIndex + 1).padStart(2, "0")}
                           </span>
+                          <ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} />
                           <span className="workflow-card__role">{agent.role ?? "agent"}</span>
                         </span>
                         <StatusBadge agent={agent} />

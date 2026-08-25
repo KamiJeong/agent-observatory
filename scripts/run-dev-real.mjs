@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 
-const env = { ...process.env, OBSERVATORY_ADAPTER: "codex" };
+const env = { ...process.env, OBSERVATORY_ADAPTER: "real" };
 let openPreference;
 const optionToEnvironment = new Map([
   ["--cwd", "OBSERVATORY_CWD"],
   ["--root-thread", "OBSERVATORY_ROOT_THREAD_ID"],
   ["--transport", "OBSERVATORY_CODEX_TRANSPORT"],
+  ["--provider", "OBSERVATORY_PROVIDERS"],
 ]);
 for (let index = 2; index < process.argv.length; index += 1) {
   const option = process.argv[index] ?? "";
@@ -22,7 +23,7 @@ for (let index = 2; index < process.argv.length; index += 1) {
   const value = process.argv[index + 1];
   if (!environmentName || !value) {
     console.error(`Unknown or incomplete Real Mode option: ${option}`);
-    console.error("Use --cwd <path|all>, --root-thread <id>, or --transport <mode>.");
+    console.error("Use --cwd <path|all>, --root-thread <id>, --transport <mode>, or --provider <codex|claude|codex,claude>.");
     process.exit(1);
   }
   env[environmentName] = value;
@@ -56,7 +57,7 @@ function forwardOutput(chunk, destination) {
   destination.write(chunk);
   if (opened) return;
   outputBuffer = stripAnsi(`${outputBuffer}${chunk.toString("utf8")}`).slice(-4_096);
-  const match = outputBuffer.match(/Codex Agent Observatory server: (http:\/\/[^\s]+)/);
+  const match = outputBuffer.match(/Agent Observatory server: (http:\/\/[^\s]+)/);
   if (!match?.[1]) return;
   opened = true;
   console.log(`Dashboard bootstrap: ${match[1]}`);

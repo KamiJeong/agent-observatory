@@ -1,9 +1,25 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ObservatorySnapshot } from "@observatory/core";
-import { ActivityTimeline, AgentGraph, AgentList, RecentActivityList, RightRail, RunHistory, WorkflowBoard } from "./App.tsx";
+import {
+  ActivityTimeline,
+  AgentGraph,
+  AgentList,
+  buildProviderGuidance,
+  DashboardFilters,
+  filterSnapshot,
+  getProviderHealth,
+  INITIAL_DASHBOARD_FILTERS,
+  NoFilterMatches,
+  ProviderOnboarding,
+  RecentActivityList,
+  RightRail,
+  RunHistory,
+  WorkflowBoard,
+} from "./App.tsx";
+import { DebugPanel } from "./components/dashboard/DashboardApp.tsx";
 
 beforeAll(() => {
   class ResizeObserverMock {
@@ -19,11 +35,11 @@ afterEach(() => cleanup());
 const snapshot: ObservatorySnapshot = {
   agents: {
     root: {
-      id: "root", threadId: "root", nickname: "Main", role: "root", status: "working",
+      provider: "codex", id: "root", threadId: "root", nickname: "Main", role: "root", status: "working",
       waitingReasons: [], recentActivityIds: [], children: ["tester"], depth: 0,
     },
     tester: {
-      id: "tester", threadId: "tester", parentId: "root", nickname: "Tester", role: "testing",
+      provider: "codex", id: "tester", threadId: "tester", parentId: "root", nickname: "Tester", role: "testing",
       status: "waiting", waitingReasons: ["approval"], recentActivityIds: ["test"], children: [], depth: 1,
       currentActivityId: "test", cwd: "/repo", model: "gpt-5.6-terra", reasoningEffort: "medium",
       observedSkills: ["sdd-verify"], observedWorkflows: ["SDD"], collaborationMode: "default",
@@ -35,12 +51,13 @@ const snapshot: ObservatorySnapshot = {
   history: [],
   pendingRequests: {},
   connection: { phase: "connected", attempt: 0 },
+  providerConnections: { codex: { phase: "connected", attempt: 0 } },
   runtime: { adapter: "mock", observatoryVersion: "test", experimentalApi: false, discoveryStrategy: "mock" },
   debug: [],
   startedAt: 0,
   revision: 1,
   roots: ["root"],
-  edges: [{ id: "root->tester", source: "root", target: "tester" }],
+  edges: [{ id: "root->tester", source: "root", target: "tester", kind: "spawn", evidenceSource: "mock" }],
 };
 
 describe("dashboard interactions", () => {
@@ -54,7 +71,8 @@ describe("dashboard interactions", () => {
     expect(root.querySelector(".agent-node__children")).toHaveTextContent("1");
     expect(tester.querySelector(".agent-node__activity")).toHaveAttribute("data-current", "true");
     fireEvent.focus(tester);
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Checks behavior, quality, tests, and acceptance criteria.");
+    expect(tester).toHaveAttribute("aria-describedby", expect.stringMatching(/^role-tooltip-/));
     fireEvent.click(tester);
     expect(onSelect).toHaveBeenCalledWith("tester");
   });
@@ -67,6 +85,59 @@ describe("dashboard interactions", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
+  it("traps focus in Debug, closes with Escape, and restores the trigger", () => {
+    const trigger = document.createElement("button");
+    trigger.textContent = "Open diagnostics";
+    document.body.append(trigger);
+    trigger.focus();
+    const onClose = vi.fn();
+    const rendered = render(<DebugPanel snapshot={snapshot} onClose={onClose} />);
+    const close = screen.getByRole("button", { name: "Close debug panel" });
+
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+
+    rendered.unmount();
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
+  it("keeps secondary relations hidden until selected or explicitly enabled", () => {
+    const onSelect = vi.fn();
+    const relationSnapshot: ObservatorySnapshot = {
+      ...snapshot,
+      edges: [
+        ...snapshot.edges,
+        {
+          id: "task:root->tester", source: "root", target: "tester", kind: "task",
+          evidenceSource: "hook", label: "Assigned verification",
+        },
+        {
+          id: "message:tester->root", source: "tester", target: "root", kind: "message",
+          evidenceSource: "protocol", label: "Reported results",
+        },
+      ],
+    };
+    const { rerender } = render(<AgentGraph snapshot={relationSnapshot} onSelect={onSelect} />);
+    const viewport = screen.getByLabelText(/Interactive agent graph/i);
+    expect(viewport.querySelectorAll("path[data-kind='task'], path[data-kind='message']")).toHaveLength(0);
+    expect(screen.queryByRole("complementary", { name: "Visible agent relations" })).not.toBeInTheDocument();
+
+    rerender(<AgentGraph snapshot={relationSnapshot} selectedId="tester" onSelect={onSelect} />);
+    expect(viewport.querySelectorAll("path[data-kind='task'], path[data-kind='message']")).toHaveLength(2);
+    expect(screen.getByRole("complementary", { name: "Visible agent relations" })).toHaveTextContent("Assigned task");
+    expect(screen.getByRole("list", { name: "Agent relation descriptions" })).toHaveTextContent("Evidence: hook");
+
+    fireEvent.click(screen.getByRole("button", { name: /Assigned task.*Select related agent/i }));
+    expect(onSelect).toHaveBeenCalledWith("root");
+    fireEvent.click(screen.getByRole("button", { name: /Show all 2 secondary relations/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Show selected relations only; 2 secondary relations available/i }));
+    expect(screen.getByRole("button", { name: /Show all 2 secondary relations/i })).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("fits a wide graph using the limiting viewport dimension", () => {
     const childIds = Array.from({ length: 12 }, (_, index) => `agent-${index + 1}`);
     const wideSnapshot: ObservatorySnapshot = {
@@ -75,6 +146,7 @@ describe("dashboard interactions", () => {
         ...snapshot.agents,
         root: { ...snapshot.agents.root!, children: childIds },
         ...Object.fromEntries(childIds.map((id) => [id, {
+          provider: "codex" as const,
           id,
           threadId: id,
           parentId: "root",
@@ -87,7 +159,7 @@ describe("dashboard interactions", () => {
           depth: 1,
         }])),
       },
-      edges: childIds.map((id) => ({ id: `root->${id}`, source: "root", target: id })),
+      edges: childIds.map((id) => ({ id: `root->${id}`, source: "root", target: id, kind: "spawn", evidenceSource: "mock" })),
     };
     render(<AgentGraph snapshot={wideSnapshot} onSelect={() => undefined} />);
     const viewport = screen.getByLabelText(/Interactive agent graph/i);
@@ -147,6 +219,7 @@ describe("dashboard interactions", () => {
     expect(root.closest(".agent-tree-item")).toHaveAttribute("data-parent", "true");
     expect(tester.closest(".agent-tree-item")).not.toHaveAttribute("data-parent");
     expect(screen.getByText("Parent")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Provider: Codex").length).toBeGreaterThan(0);
     fireEvent.click(tester);
     expect(onSelect).toHaveBeenCalledWith("tester");
   });
@@ -170,6 +243,211 @@ describe("dashboard interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Skills" }));
     expect(screen.getByText("Tester")).toBeInTheDocument();
     expect(screen.getByText("Main")).toBeInTheDocument();
+  });
+
+  it("combines provider, workspace, session, status, and activity search filters", () => {
+    const mixedSnapshot: ObservatorySnapshot = {
+      ...snapshot,
+      agents: {
+        ...snapshot.agents,
+        claude: {
+          provider: "claude",
+          id: "claude",
+          threadId: "claude-thread",
+          sessionId: "claude-session",
+          nickname: "Writer",
+          role: "writer",
+          status: "completed",
+          waitingReasons: [],
+          recentActivityIds: ["claude-write"],
+          children: [],
+          cwd: "/docs",
+        },
+      },
+      activities: [...snapshot.activities, {
+        provider: "claude",
+        id: "claude-write",
+        agentId: "claude",
+        kind: "write",
+        title: "Draft release report",
+        startedAt: 200,
+        completedAt: 300,
+      }],
+      history: [{
+        provider: "claude",
+        id: "claude-delivery",
+        kind: "delivery",
+        actor: { type: "agent", id: "claude" },
+        summary: "Report delivered",
+        occurredAt: 300,
+        source: "protocol",
+      }],
+      providerConnections: {
+        codex: { phase: "connected", attempt: 0 },
+        claude: { phase: "connected", attempt: 0 },
+      },
+      roots: ["root", "claude"],
+    };
+
+    const filtered = filterSnapshot(mixedSnapshot, {
+      provider: "claude",
+      workspace: "/docs",
+      session: "claude-session",
+      status: "completed",
+      query: "release report",
+    });
+
+    expect(Object.keys(filtered.agents)).toEqual(["claude"]);
+    expect(filtered.activities.map((activity) => activity.id)).toEqual(["claude-write"]);
+    expect(filtered.history.map((event) => event.id)).toEqual(["claude-delivery"]);
+    expect(filtered.roots).toEqual(["claude"]);
+  });
+
+  it("offers provider and runtime metadata controls with predictable reset", () => {
+    const onChange = vi.fn();
+    const filterSnapshotWithMetadata: ObservatorySnapshot = {
+      ...snapshot,
+      agents: {
+        ...snapshot.agents,
+        tester: { ...snapshot.agents.tester!, sessionId: "session-1" },
+      },
+    };
+    render(<DashboardFilters snapshot={filterSnapshotWithMetadata} filters={INITIAL_DASHBOARD_FILTERS} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Claude 0" }));
+    expect(onChange).toHaveBeenLastCalledWith({ ...INITIAL_DASHBOARD_FILTERS, provider: "claude" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Status" }), { target: { value: "live" } });
+    expect(onChange).toHaveBeenLastCalledWith({ ...INITIAL_DASHBOARD_FILTERS, status: "live" });
+    expect(screen.getByRole("combobox", { name: "Workspace" })).toHaveTextContent("/repo");
+    expect(screen.getByRole("combobox", { name: "Session" })).toHaveTextContent("session-1");
+    expect(screen.getByRole("button", { name: "Clear" })).toBeDisabled();
+  });
+
+  it("keeps provider health independent when one provider fails", () => {
+    const healthSnapshot = {
+      ...snapshot,
+      runtime: {
+        ...snapshot.runtime,
+        adapter: "composite" as const,
+        discoveryStrategy: "composite" as const,
+        providers: [
+          { ...snapshot.runtime, provider: "codex" as const, adapter: "codex" as const, connection: { phase: "connected" as const, attempt: 0 } },
+          { ...snapshot.runtime, provider: "claude" as const, adapter: "claude" as const, connection: { phase: "disconnected" as const, attempt: 3, message: "Hook unavailable" } },
+        ],
+      },
+      providerConnections: {
+        codex: { phase: "connected" as const, attempt: 0 },
+        claude: { phase: "disconnected" as const, attempt: 3, message: "Hook unavailable" },
+      },
+    } satisfies ObservatorySnapshot;
+
+    expect(getProviderHealth(healthSnapshot)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: "codex", phase: "ready", agentCount: 2 }),
+      expect.objectContaining({ provider: "claude", phase: "offline", message: "Hook unavailable", agentCount: 0 }),
+    ]));
+    expect(healthSnapshot.connection.phase).toBe("connected");
+  });
+
+  it("classifies active, idle, setup, unsupported, permission, and disconnected provider states", () => {
+    const fixtures = [
+      { health: { provider: "codex", phase: "ready" as const, agentCount: 1 }, state: "active", title: "Codex observation is active" },
+      { health: { provider: "codex", phase: "ready" as const, agentCount: 0 }, state: "no-session", title: "No active Codex session" },
+      { health: { provider: "claude", phase: "setup-required" as const, agentCount: 0 }, state: "setup-required", title: "Claude setup required" },
+      { health: { provider: "codex", phase: "unsupported" as const, agentCount: 0 }, state: "unsupported", title: "Unsupported Codex version" },
+      { health: { provider: "claude", phase: "permission-blocked" as const, agentCount: 0 }, state: "permission-blocked", title: "Claude permission blocked" },
+      { health: { provider: "claude", phase: "offline" as const, agentCount: 0 }, state: "offline", title: "Claude observation disconnected" },
+    ];
+
+    for (const fixture of fixtures) {
+      expect(buildProviderGuidance(fixture.health)).toEqual(expect.objectContaining({
+        state: fixture.state,
+        title: fixture.title,
+      }));
+    }
+    expect(buildProviderGuidance(fixtures[2]!.health).command).not.toContain("token");
+  });
+
+  it("turns concise provider connection messages into actionable diagnostic phases", () => {
+    const cases = [
+      ["Setup required before discovery", "setup-required"],
+      ["Unsupported CLI version", "unsupported"],
+      ["Permission denied reading runtime metadata", "permission-blocked"],
+      ["Collector stopped", "offline"],
+    ] as const;
+    for (const [message, phase] of cases) {
+      const diagnosticSnapshot: ObservatorySnapshot = {
+        ...snapshot,
+        agents: {},
+        roots: [],
+        edges: [],
+        providerConnections: { claude: { phase: "disconnected", attempt: 1, message } },
+        runtime: { ...snapshot.runtime, adapter: "claude", provider: "claude" },
+      };
+      expect(getProviderHealth(diagnosticSnapshot)).toContainEqual(expect.objectContaining({ provider: "claude", phase }));
+    }
+  });
+
+  it("hides the mock transport badge when a demo supplies real provider identities", () => {
+    const demoSnapshot: ObservatorySnapshot = {
+      ...snapshot,
+      agents: {
+        codex: { ...snapshot.agents.root!, id: "codex", threadId: "codex", provider: "codex", children: [] },
+        claude: { ...snapshot.agents.tester!, id: "claude", threadId: "claude", provider: "claude", children: [] },
+      },
+      providerConnections: {
+        mock: { phase: "connected", attempt: 0 },
+        codex: { phase: "connected", attempt: 0 },
+        claude: { phase: "connected", attempt: 0 },
+      },
+      runtime: { ...snapshot.runtime, adapter: "mock", provider: "mock", scenario: "demo" },
+    };
+
+    expect(getProviderHealth(demoSnapshot).map((provider) => provider.provider)).toEqual(["codex", "claude"]);
+  });
+
+  it("shows actionable no-session guidance and copies a credential-free launch command", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<ProviderOnboarding
+      providers={[{ provider: "codex", phase: "ready", agentCount: 0 }]}
+      hasAgentContent={false}
+      onOpenDebug={() => undefined}
+    />);
+
+    expect(screen.getByRole("heading", { name: "No active agent sessions" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No active Codex session" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Copy command for Launch Codex" }));
+    expect(writeText).toHaveBeenCalledWith("codex");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy command for Launch Codex" })).toHaveTextContent("Copied"));
+    expect(screen.getByRole("link", { name: "Codex troubleshooting" })).toHaveAttribute("rel", "noreferrer");
+    expect(screen.getByRole("link", { name: "Observation & privacy" })).toBeInTheDocument();
+  });
+
+  it("keeps healthy content visible while showing partial provider recovery", () => {
+    const onOpenDebug = vi.fn();
+    render(<ProviderOnboarding
+      providers={[
+        { provider: "codex", phase: "ready", agentCount: 2 },
+        { provider: "claude", phase: "permission-blocked", agentCount: 0 },
+      ]}
+      hasAgentContent
+      onOpenDebug={onOpenDebug}
+    />);
+
+    expect(screen.getByRole("heading", { name: "Partial observation" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Claude permission blocked" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Codex observation is active" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open Debug" }));
+    expect(onOpenDebug).toHaveBeenCalledOnce();
+  });
+
+  it("separates an empty filter result from provider discovery", () => {
+    const onClear = vi.fn();
+    render(<NoFilterMatches onClear={onClear} />);
+    expect(screen.getByRole("heading", { name: "No agents match these filters" })).toBeInTheDocument();
+    expect(screen.getByText(/Provider sessions may still be active/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear dashboard filters" }));
+    expect(onClear).toHaveBeenCalledOnce();
   });
 
   it("virtualizes a large activity timeline while scrolling", () => {
