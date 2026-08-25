@@ -155,7 +155,7 @@ jobs:
       - name: Publish to npm
         env:
           PACKAGE_FILE: ${{ needs.verify.outputs.package_filename }}
-        run: npm publish "package-artifact/$PACKAGE_FILE" --ignore-scripts --access public
+        run: npm publish "$GITHUB_WORKSPACE/package-artifact/$PACKAGE_FILE" --ignore-scripts --access public
 
   release:
     name: Create GitHub release
