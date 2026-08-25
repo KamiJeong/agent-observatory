@@ -120,8 +120,8 @@ export const AgentGraph = memo(function AgentGraph({
     if (isVisible) return;
     applyView({
       ...current,
-      x: bounds.width / 2 - (position.x + 109) * current.scale,
-      y: bounds.height / 2 - (position.y + 46) * current.scale,
+      x: bounds.width / 2 - (position.x + GRAPH_NODE_WIDTH / 2) * current.scale,
+      y: bounds.height / 2 - (position.y + GRAPH_NODE_HEIGHT / 2) * current.scale,
     });
   }, [applyView, layout, selectedId]);
 
@@ -189,10 +189,6 @@ export const AgentGraph = memo(function AgentGraph({
       y,
     });
   };
-  const showRoleTooltipFromNode = (event: React.FocusEvent<HTMLButtonElement>, agent: AgentNode) => {
-    const label = event.currentTarget.querySelector<HTMLElement>(".agent-node__role");
-    if (label) showRoleTooltip(label, agent);
-  };
   const handleViewportKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const current = view.current;
     const step = event.shiftKey ? 80 : 32;
@@ -253,11 +249,15 @@ export const AgentGraph = memo(function AgentGraph({
               const branchY = y1 + 18;
               const approachY = y2 - 18;
               const gutterX = target.x - 16;
+              const active = edge.target === selectedId || edge.source === selectedId;
               return (
                 <path
                   key={edge.id}
                   d={`M ${x1} ${y1} V ${branchY} H ${gutterX} V ${approachY} H ${x2} V ${y2}`}
-                  data-active={edge.target === selectedId || edge.source === selectedId || undefined}
+                  data-active={active || undefined}
+                  style={active ? {
+                    "--edge-active-color": roleColor(snapshot.agents[selectedId ?? ""]?.role),
+                  } as CSSProperties : undefined}
                 />
               );
             })}
@@ -278,7 +278,6 @@ export const AgentGraph = memo(function AgentGraph({
                 } as CSSProperties}
                 key={agent.id}
                 onClick={() => onSelect(agent.id)}
-                onFocus={(event) => showRoleTooltipFromNode(event, agent)}
                 onBlur={() => setRoleTooltip(undefined)}
                 aria-label={`${agent.nickname ?? agent.role ?? agent.id}, ${STATUS[agent.status].label}. Role ${agent.role ?? "agent"}: ${roleDescription(agent.role)}${agent.children.length > 0 ? ` Parent of ${agent.children.length} agents.` : ""}`}
                 aria-pressed={selectedId === agent.id}
@@ -307,7 +306,9 @@ export const AgentGraph = memo(function AgentGraph({
                 {agentRuntimeLabel(agent) && (
                   <span className="agent-node__runtime" title={agentRuntimeLabel(agent)}>{agentRuntimeLabel(agent)}</span>
                 )}
-                <span className="agent-node__activity">{activity?.title ?? (agent.status === "idle" ? "Ready" : "No current activity")}</span>
+                <span className="agent-node__activity" data-current={activity ? "true" : undefined}>
+                  {activity?.title ?? (agent.status === "idle" ? "Ready" : "No current activity")}
+                </span>
               </button>
             );
           })}

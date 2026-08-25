@@ -258,13 +258,17 @@ export function RightRail({
   const [tab, setTab] = useState<"activity" | "inspector">("activity");
   const [historyMode, setHistoryMode] = useState<RunHistoryMode | "trace">("story");
   const agent = selectedId ? snapshot.agents[selectedId] : undefined;
-  useEffect(() => { if (agent) setTab("inspector"); }, [agent?.id]);
+  useEffect(() => { setTab(agent ? "inspector" : "activity"); }, [agent?.id]);
+  const closeInspector = () => {
+    setTab("activity");
+    onClear();
+  };
   return (
     <aside className="right-rail panel" aria-label="Activity and agent inspector">
       <div className="rail-tabs" role="tablist">
         <button role="tab" aria-selected={tab === "activity"} onClick={() => setTab("activity")}>History</button>
         <button role="tab" aria-selected={tab === "inspector"} disabled={!agent} onClick={() => setTab("inspector")}>Inspector</button>
-        {agent && <button className="rail-tabs__close" onClick={onClear} aria-label="Close inspector">×</button>}
+        {agent && <button className="rail-tabs__close" onClick={closeInspector} aria-label="Close inspector">×</button>}
       </div>
       {tab === "inspector" && agent
         ? <Inspector agent={agent} snapshot={snapshot} now={now} />

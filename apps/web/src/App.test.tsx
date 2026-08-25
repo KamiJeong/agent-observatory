@@ -52,6 +52,9 @@ describe("dashboard interactions", () => {
     expect(tester.style.getPropertyValue("--agent-role-color")).not.toBe(root.style.getPropertyValue("--agent-role-color"));
     expect(root).toHaveClass("agent-node--parent");
     expect(root.querySelector(".agent-node__children")).toHaveTextContent("1");
+    expect(tester.querySelector(".agent-node__activity")).toHaveAttribute("data-current", "true");
+    fireEvent.focus(tester);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
     fireEvent.click(tester);
     expect(onSelect).toHaveBeenCalledWith("tester");
   });
@@ -258,6 +261,23 @@ describe("dashboard interactions", () => {
     expect(screen.getByRole("list", { name: "Messages, 1 events" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Trace" }));
     expect(screen.getByRole("list", { name: "Recent activity, 1 events" })).toBeInTheDocument();
+  });
+
+  it("returns the right rail to History when the inspector closes", () => {
+    const onClear = vi.fn();
+    const { rerender } = render(
+      <RightRail snapshot={snapshot} selectedId="tester" onClear={onClear} now={5_000} />,
+    );
+
+    expect(screen.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Close inspector" }));
+    expect(onClear).toHaveBeenCalledOnce();
+    rerender(<RightRail snapshot={snapshot} onClear={onClear} now={5_000} />);
+
+    expect(screen.getByRole("tab", { name: "History" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tab", { name: "Inspector" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Close inspector" })).not.toBeInTheDocument();
   });
 
   it("groups agents into evidence-based workflow lanes", () => {

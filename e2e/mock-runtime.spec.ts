@@ -40,6 +40,32 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   await page.getByRole("button", { name: /Implementer, Working/i }).click();
   await expect(page.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".details").getByText("Editing AgentStore.ts")).toBeVisible();
+  const selectedNode = page.locator(".agent-node[data-selected]");
+  await expect(selectedNode).toHaveCount(1);
+  await expect.poll(() => selectedNode.evaluate((node) => {
+    const nodeBounds = node.getBoundingClientRect();
+    const activityBounds = node.querySelector(".agent-node__activity")!.getBoundingClientRect();
+    const runtimeBounds = node.querySelector(".agent-node__runtime")?.getBoundingClientRect();
+    const selectionShadow = getComputedStyle(node).boxShadow;
+    return {
+      activityInsideNode: activityBounds.bottom <= nodeBounds.bottom,
+      contentDoesNotOverlap: !runtimeBounds || runtimeBounds.bottom <= activityBounds.top,
+      activityPosition: getComputedStyle(node.querySelector(".agent-node__activity")!).position,
+      hasInnerSelectionRing: selectionShadow.includes("0px 0px 0px 2px"),
+      hasOuterSelectionRing: selectionShadow.includes("0px 0px 0px 5px"),
+    };
+  })).toEqual({
+    activityInsideNode: true,
+    contentDoesNotOverlap: true,
+    activityPosition: "absolute",
+    hasInnerSelectionRing: true,
+    hasOuterSelectionRing: true,
+  });
+
+  await page.getByRole("button", { name: "Close inspector" }).click();
+  await expect(page.getByRole("tab", { name: "History" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "false");
+  await expect(page.locator(".agent-node[data-selected]")).toHaveCount(0);
 
   // A 720px CSS viewport is the layout equivalent of 200% browser zoom on a
   // 1440px desktop viewport. The responsive layout must not lose content or
