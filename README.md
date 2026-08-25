@@ -201,7 +201,7 @@ a bounded debug buffer, and unknown methods do not crash the dashboard.
 - Agent list, graph nodes, and Inspector expose observed model and reasoning effort
 - Observed skill/workflow context with Agent filters and per-node markers
 - Evidence-based Workflow Board with observed-order/status/update sorting
-- Human/agent run history with explicit sender, recipients, and completion state; bounded content appears only for fixtures or explicit opt-in capture
+- Human/agent Story with request, observable basis, aggregated execution, handoff, result, and evidence provenance; bounded content appears only for fixtures or explicit opt-in capture
 - Selection-scoped Story, Messages, and low-level Trace views; no global history is shown without an agent selection
 - Inspector with virtualized recent activity, thread, cwd, and provider-reported token usage details
 - Virtualized activity timeline with filters and a 300-event memory bound
@@ -347,7 +347,12 @@ Example:
 ```bash
 bun run dev:real -- --root-thread 019f...
 bun run dev:real -- --provider codex,claude
+bun run dev:real -- --capture-content
 ```
+
+`--capture-content` enables bounded Human request and agent response text for the
+local dashboard. Tool inputs, thinking, commands, paths, and tool-result bodies
+remain excluded; omit the flag to keep Story in metadata-only mode.
 
 ### Real-time observation boundary
 

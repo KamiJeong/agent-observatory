@@ -220,6 +220,14 @@ function discoverClaudeAgentTeams(claudeHome) {
   return teams;
 }
 
+// apps/server/src/content-capture.ts
+function contentCapturePolicy(environment = process.env) {
+  return environment.OBSERVATORY_CAPTURE_CONTENT === "1" ? "enabled" : "metadata-only";
+}
+function contentCaptureEnabled(environment = process.env) {
+  return contentCapturePolicy(environment) === "enabled";
+}
+
 // apps/server/src/claude-adapter.ts
 var TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
 var DEFAULT_POLL_INTERVAL_MS = 2e3;
@@ -297,6 +305,15 @@ function addUsage(total, usage) {
   total.totalTokens = total.inputTokens + total.cachedInputTokens + total.outputTokens;
   total.modelContextWindow += 0;
 }
+function boundedMessageText(content) {
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.flatMap((item) => {
+    const block = recordValue2(item);
+    return block?.type === "text" && typeof block.text === "string" ? [block.text] : [];
+  }).join("\n\n") : "";
+  const trimmed = text.trim();
+  if (!trimmed) return void 0;
+  return trimmed.length > 2e3 ? `${trimmed.slice(0, 1999)}\u2026` : trimmed;
+}
 function parseClaudeTranscript(text, context) {
   const activities = /* @__PURE__ */ new Map();
   const history = [];
@@ -335,6 +352,7 @@ function parseClaudeTranscript(text, context) {
       hasUsage = true;
     }
     const content = Array.isArray(message?.content) ? message.content : [];
+    const capturedText = context.captureContent ? boundedMessageText(message?.content) : void 0;
     if (role2 === "assistant") {
       let hasText = false;
       let hasTool = false;
@@ -381,6 +399,7 @@ function parseClaudeTranscript(text, context) {
           kind: "delivery",
           actor: { type: "agent", id: context.threadId },
           summary: "Agent response",
+          ...capturedText ? { content: capturedText } : {},
           status: "sent",
           occurredAt: at ?? lastTimestamp ?? Date.now(),
           source: "transcript"
@@ -413,6 +432,7 @@ function parseClaudeTranscript(text, context) {
             actor: { type: "human" },
             recipients: [{ type: "agent", id: context.threadId }],
             summary: "User request",
+            ...capturedText ? { content: capturedText } : {},
             status: "sent",
             occurredAt: at ?? lastTimestamp ?? Date.now(),
             source: "transcript"
@@ -443,7 +463,7 @@ function parseClaudeTranscript(text, context) {
       provider: "claude",
       observation: "transcript",
       schema: "compatibility",
-      contentCaptured: false,
+      contentCaptured: context.captureContent === true,
       agentKind: context.isRoot ? "session" : "subagent"
     },
     evidenceSources: ["transcript"],
@@ -792,6 +812,7 @@ var ClaudeCodeAdapter = class {
   #pollIntervalMs;
   #now;
   #processDiscovery;
+  #captureContent;
   constructor(options = {}) {
     const environment = options.environment ?? process.env;
     this.#claudeHome = options.claudeHome ?? join2(homedir(), ".claude");
@@ -799,6 +820,7 @@ var ClaudeCodeAdapter = class {
     this.#pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.#now = options.now ?? Date.now;
     this.#processDiscovery = options.processDiscovery ?? findInteractiveClaudeCwds;
+    this.#captureContent = contentCaptureEnabled(environment);
   }
   runtimeInfo() {
     return {
@@ -808,7 +830,7 @@ var ClaudeCodeAdapter = class {
       claudeCliVersion: this.#version,
       experimentalApi: false,
       discoveryStrategy: "compatibility",
-      contentCapture: "metadata-only"
+      contentCapture: this.#captureContent ? "enabled" : "metadata-only"
     };
   }
   subscribe(listener) {
@@ -921,7 +943,8 @@ var ClaudeCodeAdapter = class {
           isRoot: true,
           processActive,
           createdAt: rootTail.stat.birthtimeMs || void 0,
-          updatedAt: rootTail.stat.mtimeMs
+          updatedAt: rootTail.stat.mtimeMs,
+          captureContent: this.#captureContent
         });
         results.push({ ...root, path: path2 });
         const subagentsDir = join2(projectDir, sessionId, "subagents");
@@ -952,7 +975,8 @@ var ClaudeCodeAdapter = class {
             processActive,
             createdAt: tail.stat.birthtimeMs || void 0,
             updatedAt: tail.stat.mtimeMs,
-            meta
+            meta,
+            captureContent: this.#captureContent
           });
           parsedAgents.push({ observed: { ...parsed, path: agentPath }, meta });
         }
@@ -1723,6 +1747,7 @@ var CompositeRuntimeAdapter = class {
       observatoryVersion: providers[0]?.observatoryVersion ?? "unknown",
       experimentalApi: providers.some((runtime) => runtime.experimentalApi),
       discoveryStrategy: "composite",
+      contentCapture: providers.every((runtime) => runtime.contentCapture === "enabled") ? "enabled" : "metadata-only",
       providers
     };
   }
@@ -2371,7 +2396,8 @@ var RealCodexAdapter = class {
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: this.#experimental,
-      discoveryStrategy: this.#strategy
+      discoveryStrategy: this.#strategy,
+      contentCapture: contentCapturePolicy()
     };
   }
   async connect() {
@@ -2630,11 +2656,8 @@ var RealCodexAdapter = class {
 import { createServer } from "node:http";
 
 // apps/server/src/http/public-payload.ts
-function captureContent() {
-  return process.env.OBSERVATORY_CAPTURE_CONTENT === "1";
-}
 function mayExpose(provider) {
-  return captureContent() || provider === "mock";
+  return contentCaptureEnabled() || provider === "mock";
 }
 function publicMetadata(metadata) {
   if (!metadata) return void 0;
@@ -3073,7 +3096,8 @@ var MockCodexAdapter = class {
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
       discoveryStrategy: "mock",
-      scenario: this.#scenario
+      scenario: this.#scenario,
+      contentCapture: "enabled"
     };
   }
   async connect() {
@@ -3167,12 +3191,11 @@ var MockCodexAdapter = class {
     this.#threads.set(thread.id, thread);
     this.#emit({ type: "thread.discovered", at: Date.now(), thread });
   }
-  #activity(agentId, id, kind, title, detail) {
-    const now = Date.now();
+  #activity(agentId, id, kind, title, detail, startedAt = Date.now()) {
     this.#emit({
       type: "activity.started",
-      at: now,
-      activity: { id, agentId, kind, title, ...detail ? { detail } : {}, startedAt: now }
+      at: startedAt,
+      activity: { id, agentId, kind, title, ...detail ? { detail } : {}, startedAt }
     });
   }
   #history(history) {
@@ -3378,7 +3401,7 @@ var MockCodexAdapter = class {
       summary: "Multi-provider release requested",
       content: "Coordinate implementation and verification across Codex and Claude Code.",
       status: "completed",
-      occurredAt: now,
+      occurredAt: now - 50,
       source: "mock"
     });
     this.#history({
@@ -3388,7 +3411,7 @@ var MockCodexAdapter = class {
       summary: "Release plan confirmed",
       content: "Build the runtime, review privacy, then complete browser verification.",
       status: "completed",
-      occurredAt: now + 1,
+      occurredAt: now - 40,
       source: "mock"
     });
     this.#history({
@@ -3400,7 +3423,7 @@ var MockCodexAdapter = class {
       summary: "Claude review requested",
       content: "Validate compatibility evidence and privacy boundaries.",
       status: "sent",
-      occurredAt: now + 2,
+      occurredAt: now - 30,
       source: "mock"
     });
     this.#history({
@@ -3412,7 +3435,7 @@ var MockCodexAdapter = class {
       summary: "Privacy review assigned",
       content: "Confirm metadata-only payload behavior.",
       status: "sent",
-      occurredAt: now + 3,
+      occurredAt: now - 20,
       source: "mock"
     });
     this.#history({
@@ -3424,7 +3447,7 @@ var MockCodexAdapter = class {
       summary: "Review evidence shared",
       content: "Raw provider content remains outside the public payload.",
       status: "sent",
-      occurredAt: now + 4,
+      occurredAt: now + 10,
       source: "mock"
     });
     this.#emit({
@@ -3440,26 +3463,37 @@ var MockCodexAdapter = class {
         modelContextWindow: 258400
       }
     });
-    this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout");
-    this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts");
-    this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence");
-    this.#activity("claude:demo-reviewer", "demo-privacy", "test", "Checking privacy boundary", "provider content redaction");
+    this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout", void 0, now + 15);
+    this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts", now + 20);
+    this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence", now + 21);
+    this.#activity("claude:demo-reviewer", "demo-privacy", "test", "Checking privacy boundary", "provider content redaction", now + 22);
+    this.#history({
+      id: "demo-build-result",
+      kind: "delivery",
+      actor: { type: "agent", id: "codex:demo-builder" },
+      recipients: [{ type: "agent", id: "codex:demo-orchestrator" }],
+      summary: "Runtime implementation completed",
+      content: "Composite provider observation and privacy safeguards are ready for verification.",
+      status: "completed",
+      occurredAt: now + 30,
+      source: "mock"
+    });
     this.#emit({
       type: "request.opened",
-      at: now + 5,
+      at: now + 40,
       request: {
         id: "demo-browser-approval",
         agentId: "codex:demo-tester",
         reason: "approval",
         title: "Browser verification approval",
         detail: "Run the deterministic demo capture",
-        openedAt: now + 5,
+        openedAt: now + 40,
         evidenceSource: "mock"
       }
     });
     this.#emit({
       type: "agent.lifecycle",
-      at: now + 6,
+      at: now + 50,
       threadId: "claude:demo-researcher",
       status: "completed"
     });
@@ -4201,7 +4235,8 @@ var SharedStateCodexAdapter = class {
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
-      discoveryStrategy: "compatibility"
+      discoveryStrategy: "compatibility",
+      contentCapture: contentCapturePolicy()
     };
   }
   subscribe(listener) {

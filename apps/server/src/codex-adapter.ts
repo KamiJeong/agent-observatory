@@ -9,6 +9,7 @@ import type {
   ThreadSnapshot,
 } from "@observatory/core";
 import { normalizeEnvelope, parseEnvelope, toThreadSnapshot, type JsonRpcEnvelope } from "./normalize.ts";
+import { contentCapturePolicy } from "./content-capture.ts";
 
 interface PendingCall {
   resolve(value: unknown): void;
@@ -62,6 +63,7 @@ export class RealCodexAdapter implements AgentRuntimeAdapter {
       protocolGenerationVersion: "0.149.0",
       experimentalApi: this.#experimental,
       discoveryStrategy: this.#strategy,
+      contentCapture: contentCapturePolicy(),
     };
   }
 

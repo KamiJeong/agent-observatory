@@ -23,11 +23,15 @@ for (let index = 2; index < process.argv.length; index += 1) {
     openPreference = nextPreference;
     continue;
   }
+  if (option === "--capture-content") {
+    env.OBSERVATORY_CAPTURE_CONTENT = "1";
+    continue;
+  }
   const environmentName = optionToEnvironment.get(option);
   const value = process.argv[index + 1];
   if (!environmentName || !value) {
     console.error(`Unknown or incomplete Real Mode option: ${option}`);
-    console.error("Use --cwd <path|all>, --root-thread <id>, --transport <mode>, or --provider <codex|claude|codex,claude>.");
+    console.error("Use --cwd <path|all>, --root-thread <id>, --transport <mode>, --provider <codex|claude|codex,claude>, or --capture-content.");
     process.exit(1);
   }
   env[environmentName] = value;

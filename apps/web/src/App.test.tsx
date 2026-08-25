@@ -495,7 +495,7 @@ describe("dashboard interactions", () => {
           summary: "Sent message",
           content: "Verify the browser flow",
           status: "sent",
-          occurredAt: 300,
+          occurredAt: 225,
           source: "protocol",
         },
         {
@@ -528,17 +528,63 @@ describe("dashboard interactions", () => {
           occurredAt: 260,
           source: "derived",
         },
+        {
+          id: "work-result-check",
+          kind: "work",
+          actor: { type: "agent", id: "tester" },
+          summary: "Checking browser result",
+          content: "Authentication redirect",
+          status: "completed",
+          occurredAt: 275,
+          source: "protocol",
+        },
+        {
+          id: "result",
+          kind: "delivery",
+          actor: { type: "agent", id: "tester" },
+          recipients: [{ type: "agent", id: "root" }],
+          summary: "Browser verification completed",
+          content: "Authentication flow passed",
+          status: "completed",
+          occurredAt: 400,
+          source: "protocol",
+        },
       ],
     }} selectedId="root" />);
 
-    const events = screen.getByRole("list", { name: "Run history, 3 events" });
+    const events = screen.getByRole("list", { name: "Run history, 5 events" });
     expect([...events.querySelectorAll(".history-event__summary")].map((node) => node.textContent))
-      .toEqual(["Request received", "Plan updated", "Sent message"]);
+      .toEqual(["Request received", "Plan updated", "Sent message", "Observed execution", "Browser verification completed"]);
     expect(screen.getByText("Verify the browser flow")).toBeInTheDocument();
-    expect(screen.queryByText("Running browser command")).not.toBeInTheDocument();
+    expect(screen.getByText("Running browser command")).toBeInTheDocument();
+    expect(screen.getByText("Checking browser result")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "2 observed execution steps" })).toBeInTheDocument();
+    expect(screen.getByText("Observed basis").parentElement).toHaveTextContent("Handoff · Sent message");
+    expect(screen.getByText("Authentication flow passed")).toBeInTheDocument();
     expect(screen.queryByText("Coordinating browser run")).not.toBeInTheDocument();
     expect(events.querySelector(".history-event__route")?.textContent).toContain("Human→Main");
     expect(events.querySelectorAll(".history-event__route")[2]?.textContent).toContain("Main→Tester");
+    expect([...events.querySelectorAll(".history-event__phase > span")].map((node) => node.textContent))
+      .toEqual(["Request", "Decision", "Handoff", "Execution", "Result"]);
+  });
+
+  it("explains metadata-only Story content capture for the selected provider", () => {
+    render(<RunHistory snapshot={{
+      ...snapshot,
+      runtime: {
+        ...snapshot.runtime,
+        adapter: "claude",
+        provider: "claude",
+        contentCapture: "metadata-only",
+      },
+      agents: {
+        ...snapshot.agents,
+        root: { ...snapshot.agents.root!, provider: "claude" },
+      },
+    }} selectedId="root" />);
+
+    expect(screen.getByRole("note")).toHaveTextContent("Content privacy is on");
+    expect(screen.getByRole("note")).toHaveTextContent("--capture-content");
   });
 
   it("requires an agent selection before showing narrative messages or low-level trace", () => {
