@@ -133,16 +133,21 @@ Codex App Server (JSONL over stdio)
 
 ```text
 apps/
-  server/                 App Server adapter, normalizer, local WebSocket server
-  web/                    React/Vite dashboard
+  server/src/http/        API routing, session, WebSocket, and static-delivery modules
+  web/src/components/    Reusable React components grouped by dashboard feature
+  web/src/lib/           Framework-independent graph layout utilities
 packages/
   codex-protocol/         generated-protocol version boundary
   observatory-core/       domain types, graph/status projector, state store
 generated/
   codex*/                 Codex 0.149.0 generated TS and JSON Schema
 docs/
+  architecture.md         Module boundaries and dependency rules
   codex-protocol.md       Phase 1 protocol findings and mapping decisions
 ```
+
+See [Architecture boundaries](docs/architecture.md) for the module ownership,
+dependency direction, and extension points used by the server and dashboard.
 
 Raw Codex JSON is never consumed by React components. Known envelopes are
 tolerantly normalized; additive fields are allowed, malformed events go to a

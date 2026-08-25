@@ -226,6 +226,7 @@ describe("Observatory HTTP trust boundary", () => {
     const limited = await fetch(`${baseUrl}/api/retry`, { method: "POST", headers });
     expect(first.status).toBe(202);
     expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("1");
     expect(adapter.connectCalls).toBe(1);
     finishConnect?.();
   });

@@ -128,16 +128,21 @@ Codex App Server (JSONL over stdio)
 
 ```text
 apps/
-  server/                 App Server 어댑터, 정규화기, 로컬 WebSocket 서버
-  web/                    React/Vite 대시보드
+  server/src/http/        API 라우팅, 세션, WebSocket, 정적 파일 전송 모듈
+  web/src/components/    대시보드 기능별 재사용 React 컴포넌트
+  web/src/lib/           프레임워크와 독립적인 그래프 배치 유틸리티
 packages/
   codex-protocol/         생성된 프로토콜 버전 경계
   observatory-core/       도메인 타입, 그래프/상태 투영기, 상태 저장소
 generated/
   codex*/                 Codex 0.149.0에서 생성한 TS 및 JSON Schema
 docs/
+  architecture.md         모듈 경계와 의존성 규칙
   codex-protocol.md       1단계 프로토콜 조사 결과 및 매핑 결정
 ```
+
+서버와 대시보드의 모듈 책임, 의존 방향, 확장 지점은
+[아키텍처 경계](docs/architecture.md)에서 확인할 수 있습니다.
 
 React 컴포넌트는 원시 Codex JSON을 직접 사용하지 않습니다. 알려진 엔벌로프는
 관대하게 정규화하고, 추가 필드를 허용하며, 잘못된 이벤트는 크기가 제한된 디버그
