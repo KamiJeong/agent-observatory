@@ -45,7 +45,8 @@ data. Reproduce it with `bunx agent-observatory --scenario demo`.
 ### Run directly with bunx
 
 Run without installing the npm package separately. The default is Real Mode
-with both Codex and Claude selected, and it opens a browser automatically.
+with both Codex and Claude selected across all active workspaces, and it opens
+a browser automatically.
 
 ```bash
 bunx agent-observatory
@@ -67,8 +68,8 @@ bunx agent-observatory --mock
 bunx agent-observatory --scenario demo
 ```
 
-You can also limit observation to a specific working directory or disable
-automatic browser launch.
+Use `--cwd` to narrow the default all-workspace view, or disable automatic
+browser launch.
 
 ```bash
 bunx agent-observatory --cwd /absolute/path/to/project

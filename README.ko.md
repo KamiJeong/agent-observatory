@@ -42,8 +42,8 @@ Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 �
 
 ### bunx로 바로 실행
 
-npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 Codex와 Claude를
-모두 선택하는 Real Mode이며, 실행 후 브라우저가 자동으로 열립니다.
+npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 모든 활성 workspace의
+Codex와 Claude를 함께 선택하는 Real Mode이며, 실행 후 브라우저가 자동으로 열립니다.
 
 ```bash
 bunx agent-observatory
@@ -65,7 +65,8 @@ bunx agent-observatory --mock
 bunx agent-observatory --scenario demo
 ```
 
-특정 작업 디렉터리만 보거나 브라우저를 자동으로 열지 않을 수도 있습니다.
+기본 전체 workspace 보기에서 특정 작업 디렉터리만 보거나 브라우저를 자동으로 열지
+않을 수도 있습니다.
 
 ```bash
 bunx agent-observatory --cwd /absolute/path/to/project

@@ -3,11 +3,13 @@ export interface RuntimeValues {
   mock?: boolean;
   scenario?: string;
   provider?: string;
+  cwd?: string;
 }
 
 export interface RuntimeConfiguration {
   adapter: "real" | "mock";
   providers?: string;
+  cwd?: string;
 }
 
 export interface BrowserCommand {
