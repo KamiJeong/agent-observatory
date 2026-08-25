@@ -69,8 +69,15 @@ describe("agent-observatory CLI", () => {
       expect(token).toBeTruthy();
       const unauthorized = await fetch(`http://127.0.0.1:${port}/api/snapshot`);
       expect(unauthorized.status).toBe(401);
+      const bootstrap = await fetch(`http://127.0.0.1:${port}/?token=${encodeURIComponent(token ?? "")}`, {
+        redirect: "manual",
+      });
+      expect(bootstrap.status).toBe(302);
+      expect(bootstrap.headers.get("location")).toBe("/");
+      const sessionCookie = bootstrap.headers.get("set-cookie")?.split(";", 1)[0];
+      expect(sessionCookie).toMatch(/^observatory_session=/);
       const snapshot = await fetch(`http://127.0.0.1:${port}/api/snapshot`, {
-        headers: { authorization: `Bearer ${token}` },
+        headers: { cookie: sessionCookie ?? "" },
       });
       expect(snapshot.status).toBe(200);
     } finally {

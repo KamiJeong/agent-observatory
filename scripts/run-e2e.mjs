@@ -54,11 +54,11 @@ const ready = new Promise((resolve, reject) => {
 
 try {
   await ready;
-  const test = spawn("bunx", ["playwright", "test"], {
+  const test = spawn(process.execPath, ["node_modules/@playwright/test/cli.js", "test"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
-      OBSERVATORY_E2E_ACCESS_TOKEN: accessToken,
+      OBSERVATORY_E2E_BOOTSTRAP_URL: `http://127.0.0.1:${serverPort}/?token=${encodeURIComponent(accessToken)}`,
       OBSERVATORY_WEB_URL: webUrl,
     },
     stdio: "inherit",

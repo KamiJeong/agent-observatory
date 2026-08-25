@@ -11,9 +11,14 @@ import type {
 } from "@observatory/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-import { createObservatoryHttpServer, isPathWithin } from "./http-server.ts";
+import {
+  createObservatoryHttpServer,
+  isPathWithin,
+  OBSERVATORY_SESSION_COOKIE,
+} from "./http-server.ts";
 
 const ACCESS_TOKEN = "test-access-token-with-enough-entropy";
+const SESSION_COOKIE = `${OBSERVATORY_SESSION_COOKIE}=${encodeURIComponent(ACCESS_TOKEN)}`;
 
 class TestAdapter implements CodexAdapter {
   readonly mode = "mock" as const;
@@ -53,9 +58,12 @@ class TestAdapter implements CodexAdapter {
   }
 }
 
-function websocketStatus(url: string, origin?: string): Promise<number> {
+function websocketStatus(url: string, origin?: string, cookie?: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url, origin ? { origin } : undefined);
+    const socket = new WebSocket(url, {
+      ...(origin ? { origin } : {}),
+      ...(cookie ? { headers: { cookie } } : {}),
+    });
     socket.once("unexpected-response", (_request, response) => {
       response.resume();
       resolve(response.statusCode ?? 0);
@@ -95,20 +103,39 @@ describe("Observatory HTTP trust boundary", () => {
     await new Promise<void>((resolve, reject) => instance.server.close((error) => error ? reject(error) : resolve()));
   });
 
-  it("requires the access token and rejects cross-origin API requests", async () => {
+  it("bootstraps an HttpOnly same-site session cookie", async () => {
+    const invalid = await fetch(`${baseUrl}/?token=invalid`, { redirect: "manual" });
+    expect(invalid.status).toBe(401);
+    expect(invalid.headers.get("set-cookie")).toBeNull();
+
+    const bootstrap = await fetch(`${baseUrl}/?token=${encodeURIComponent(ACCESS_TOKEN)}`, { redirect: "manual" });
+    expect(bootstrap.status).toBe(302);
+    expect(bootstrap.headers.get("location")).toBe("http://127.0.0.1:4318");
+    expect(bootstrap.headers.get("set-cookie")).toBe(
+      `${SESSION_COOKIE}; HttpOnly; SameSite=Strict; Path=/`,
+    );
+    expect(bootstrap.headers.get("cache-control")).toBe("no-store");
+    expect(bootstrap.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("requires the session cookie and rejects cross-origin API requests", async () => {
     const missing = await fetch(`${baseUrl}/api/snapshot`);
     expect(missing.status).toBe(401);
+    const legacyBearer = await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${ACCESS_TOKEN}` },
+    });
+    expect(legacyBearer.status).toBe(401);
     const retryWithoutToken = await fetch(`${baseUrl}/api/retry`, { method: "POST" });
     expect(retryWithoutToken.status).toBe(401);
     expect(adapter.connectCalls).toBe(0);
 
     const hostile = await fetch(`${baseUrl}/api/snapshot`, {
-      headers: { authorization: `Bearer ${ACCESS_TOKEN}`, origin: "https://attacker.example" },
+      headers: { cookie: SESSION_COOKIE, origin: "https://attacker.example" },
     });
     expect(hostile.status).toBe(403);
 
     const allowed = await fetch(`${baseUrl}/api/snapshot`, {
-      headers: { authorization: `Bearer ${ACCESS_TOKEN}`, origin: baseUrl },
+      headers: { cookie: SESSION_COOKIE, origin: baseUrl },
     });
     expect(allowed.status).toBe(200);
     expect(allowed.headers.get("cache-control")).toBe("no-store");
@@ -116,7 +143,7 @@ describe("Observatory HTTP trust boundary", () => {
     expect(allowed.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
 
     const localhostDevOrigin = await fetch(`${baseUrl}/api/snapshot`, {
-      headers: { authorization: `Bearer ${ACCESS_TOKEN}`, origin: "http://localhost:4318" },
+      headers: { cookie: SESSION_COOKIE, origin: "http://localhost:4318" },
     });
     expect(localhostDevOrigin.status).toBe(200);
   });
@@ -139,16 +166,17 @@ describe("Observatory HTTP trust boundary", () => {
     expect(status).toBe(403);
   });
 
-  it("requires token and same-origin checks during WebSocket upgrade", async () => {
+  it("requires the session cookie and same-origin checks during WebSocket upgrade", async () => {
     const wsBase = baseUrl.replace("http:", "ws:");
     await expect(websocketStatus(`${wsBase}/ws`, baseUrl)).resolves.toBe(401);
-    await expect(websocketStatus(`${wsBase}/ws?token=${encodeURIComponent(ACCESS_TOKEN)}`)).resolves.toBe(403);
-    await expect(websocketStatus(`${wsBase}/ws?token=${encodeURIComponent(ACCESS_TOKEN)}`, "https://attacker.example")).resolves.toBe(403);
+    await expect(websocketStatus(`${wsBase}/ws`, undefined, SESSION_COOKIE)).resolves.toBe(403);
+    await expect(websocketStatus(`${wsBase}/ws?token=${encodeURIComponent(ACCESS_TOKEN)}`, baseUrl)).resolves.toBe(401);
+    await expect(websocketStatus(`${wsBase}/ws`, "https://attacker.example", SESSION_COOKIE)).resolves.toBe(403);
     const port = (instance.server.address() as AddressInfo).port;
     const hostileHost = await new Promise<number>((resolve, reject) => {
-      const socket = new WebSocket(`${wsBase}/ws?token=${encodeURIComponent(ACCESS_TOKEN)}`, {
+      const socket = new WebSocket(`${wsBase}/ws`, {
         origin: baseUrl,
-        headers: { host: `attacker.example:${port}` },
+        headers: { cookie: SESSION_COOKIE, host: `attacker.example:${port}` },
       });
       socket.once("unexpected-response", (_request, response) => {
         response.resume();
@@ -163,7 +191,10 @@ describe("Observatory HTTP trust boundary", () => {
     expect(hostileHost).toBe(403);
 
     const message = await new Promise<string>((resolve, reject) => {
-      const socket = new WebSocket(`${wsBase}/ws?token=${encodeURIComponent(ACCESS_TOKEN)}`, { origin: baseUrl });
+      const socket = new WebSocket(`${wsBase}/ws`, {
+        origin: baseUrl,
+        headers: { cookie: SESSION_COOKIE },
+      });
       socket.once("message", (data) => {
         resolve(data.toString());
         socket.close();
@@ -176,7 +207,10 @@ describe("Observatory HTTP trust boundary", () => {
   it("closes WebSockets that exceed the small inbound payload limit", async () => {
     const wsBase = baseUrl.replace("http:", "ws:");
     const closeCode = await new Promise<number>((resolve, reject) => {
-      const socket = new WebSocket(`${wsBase}/ws?token=${encodeURIComponent(ACCESS_TOKEN)}`, { origin: baseUrl });
+      const socket = new WebSocket(`${wsBase}/ws`, {
+        origin: baseUrl,
+        headers: { cookie: SESSION_COOKIE },
+      });
       socket.once("open", () => socket.send("x".repeat(8 * 1024 + 1)));
       socket.once("close", resolve);
       socket.once("error", reject);
@@ -187,7 +221,7 @@ describe("Observatory HTTP trust boundary", () => {
   it("coalesces concurrent retries and rate limits repeated requests", async () => {
     let finishConnect: (() => void) | undefined;
     adapter.setConnectResult(new Promise<void>((resolve) => { finishConnect = resolve; }));
-    const headers = { authorization: `Bearer ${ACCESS_TOKEN}`, origin: baseUrl };
+    const headers = { cookie: SESSION_COOKIE, origin: baseUrl };
     const first = await fetch(`${baseUrl}/api/retry`, { method: "POST", headers });
     const limited = await fetch(`${baseUrl}/api/retry`, { method: "POST", headers });
     expect(first.status).toBe(202);
@@ -220,7 +254,7 @@ describe("Observatory HTTP trust boundary", () => {
       },
     });
     const response = await fetch(`${baseUrl}/api/snapshot`, {
-      headers: { authorization: `Bearer ${ACCESS_TOKEN}` },
+      headers: { cookie: SESSION_COOKIE },
     });
     const snapshot = await response.json() as { debug: Array<Record<string, unknown>> };
     expect(snapshot.debug[0]).not.toHaveProperty("payload");

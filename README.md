@@ -70,7 +70,9 @@ bun install
 bun run dev
 ```
 
-Open <http://127.0.0.1:4318> in a browser.
+Open the `Codex Agent Observatory server` bootstrap URL printed by the backend.
+It sets an HttpOnly local session cookie and redirects to
+<http://127.0.0.1:4318> without leaving credentials in the dashboard URL.
 
 #### 2. Observe currently running Codex agents
 
@@ -82,9 +84,11 @@ codex --version
 bun run dev:real
 ```
 
-Open <http://127.0.0.1:4318> in a browser. By default, the shared compatibility
-transport discovers all active Codex working directories observable on the
-current machine.
+The development launcher opens the authenticated dashboard automatically when
+possible. Otherwise, open the printed `Dashboard bootstrap` URL. By default,
+the shared compatibility transport discovers all active Codex working
+directories observable on the current machine. Use `--no-open` to suppress the
+browser launch.
 
 To view only one project, specify its exact working directory. The development
 launcher accepts the same scope on Linux, macOS, PowerShell, and Command Prompt.
@@ -211,7 +215,7 @@ Mock Mode does not require Codex CLI.
 
 ```bash
 bun run dev          # server :4317 + Vite :4318, Mock scenario A
-bun run dev:real     # cross-platform Real Mode launcher
+bun run dev:real     # Real Mode launcher; opens an authenticated local session
 bun run typecheck
 bun run test
 bun run test:e2e
@@ -228,7 +232,9 @@ After `bun run build`, the local backend can serve the production web bundle:
 bun run --filter @observatory/server start
 ```
 
-Then open <http://127.0.0.1:4317>.
+Then open the tokenized local bootstrap URL printed by the server. The token is
+used once to establish an HttpOnly, SameSite session cookie and is removed from
+the browser URL by a redirect.
 
 ## Mock Mode
 
@@ -405,6 +411,11 @@ The browser retries its local WebSocket with exponential backoff. The Real
 adapter separately retries App Server process exits. Use the Debug panel for
 connection and protocol summaries; raw stack traces are not exposed in the
 main UI.
+
+If the dashboard reports that authentication is required, do not open the Vite
+port directly. Restart Observatory and use the newest `Codex Agent Observatory
+server` or `Dashboard bootstrap` URL. Sessions from an earlier server process
+are intentionally invalid after restart.
 
 ### Real Mode shows UNKNOWN
 
