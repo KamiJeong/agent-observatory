@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
 
-const env = { ...process.env, OBSERVATORY_ADAPTER: "real" };
+const env = {
+  ...process.env,
+  OBSERVATORY_ADAPTER: "real",
+  OBSERVATORY_LAUNCH_CWD: process.cwd(),
+};
 let openPreference;
 const optionToEnvironment = new Map([
   ["--cwd", "OBSERVATORY_CWD"],

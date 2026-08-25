@@ -193,6 +193,45 @@ describe("Claude agent-team compatibility evidence", () => {
 });
 
 describe("Claude adapter", () => {
+  it("uses the preserved launcher cwd instead of the nested server cwd", async () => {
+    const claudeHome = temporaryDirectory();
+    const projectDir = join(claudeHome, "projects", "-workspace-demo");
+    write(join(projectDir, "session-1.jsonl"), fixture("root.jsonl"));
+    const adapter = new ClaudeCodeAdapter({
+      claudeHome,
+      environment: {
+        OBSERVATORY_LAUNCH_CWD: "/workspace/demo",
+        INIT_CWD: "/workspace/server-package",
+      },
+      processDiscovery: () => ({
+        cwdCounts: new Map([["/workspace/demo", 1]]),
+        processCount: 1,
+        exact: true,
+        source: "procfs",
+      }),
+    });
+
+    const threads = await adapter.listThreads();
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0]).toMatchObject({ cwd: "/workspace/demo" });
+
+    const explicitlyRestricted = new ClaudeCodeAdapter({
+      claudeHome,
+      environment: {
+        OBSERVATORY_CWD: "/workspace/other",
+        OBSERVATORY_LAUNCH_CWD: "/workspace/demo",
+      },
+      processDiscovery: () => ({
+        cwdCounts: new Map([["/workspace/demo", 1]]),
+        processCount: 1,
+        exact: true,
+        source: "procfs",
+      }),
+    });
+    await expect(explicitlyRestricted.listThreads()).resolves.toEqual([]);
+  });
+
   it("discovers a namespaced root and subagent with a mapped parent", async () => {
     const claudeHome = temporaryDirectory();
     const projectDir = join(claudeHome, "projects", "-workspace-demo");
