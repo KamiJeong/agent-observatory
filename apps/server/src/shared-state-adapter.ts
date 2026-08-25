@@ -27,6 +27,7 @@ import type {
   TokenUsageSnapshot,
 } from "@observatory/core";
 import { contentCapturePolicy } from "./content-capture.ts";
+import { OBSERVATORY_VERSION } from "./version.ts";
 import {
   discoverInteractiveCodexProcesses,
   selectRootThreadIds,
@@ -570,7 +571,7 @@ export class SharedStateCodexAdapter implements AgentRuntimeAdapter {
     return {
       adapter: "codex",
       provider: this.provider,
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,

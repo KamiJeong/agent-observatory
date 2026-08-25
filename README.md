@@ -25,14 +25,13 @@ are working in parallel:
 ![Codex](https://img.shields.io/badge/Codex-0.149.0-64748b)
 ![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.241-d97757)
 [![npm version](https://img.shields.io/npm/v/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
-[![npm downloads](https://img.shields.io/npm/dm/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
 
 ## Demo
 
 ![Agent Observatory showing Codex and Claude agents in one dashboard](docs/assets/agent-observatory-demo.png)
 
 <details>
-<summary>Watch the provider filter, relationship view, Inspector, and Workflow Board</summary>
+<summary>Watch the provider filter, relationship view, Story, Inspector, and Workflow Board</summary>
 
 ![Agent Observatory multi-provider interaction demo](docs/assets/agent-observatory-demo.gif)
 

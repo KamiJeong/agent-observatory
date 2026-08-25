@@ -228,6 +228,85 @@ function contentCaptureEnabled(environment = process.env) {
   return contentCapturePolicy(environment) === "enabled";
 }
 
+// package.json
+var package_default = {
+  name: "agent-observatory",
+  version: "0.2.0",
+  description: "Local observability dashboard for Codex and Claude Code multi-agent workflows",
+  license: "MIT",
+  type: "module",
+  bin: {
+    "agent-observatory": "bin/agent-observatory.js"
+  },
+  files: [
+    "bin",
+    "apps/server/dist",
+    "apps/web/dist",
+    "README.md"
+  ],
+  repository: {
+    type: "git",
+    url: "git+https://github.com/KamiJeong/agent-observatory.git"
+  },
+  homepage: "https://github.com/KamiJeong/agent-observatory#readme",
+  bugs: {
+    url: "https://github.com/KamiJeong/agent-observatory/issues"
+  },
+  keywords: [
+    "codex",
+    "claude",
+    "claude-code",
+    "agents",
+    "observability",
+    "dashboard",
+    "developer-tools"
+  ],
+  engines: {
+    node: ">=22.13"
+  },
+  packageManager: "bun@1.3.14",
+  workspaces: [
+    "apps/*",
+    "packages/*"
+  ],
+  scripts: {
+    dev: 'concurrently -n server,web -c yellow,cyan "bun run --filter @observatory/server dev" "bun run --filter @observatory/web dev"',
+    "dev:real": "node scripts/run-dev-real.mjs",
+    "demo:capture": "bun run build:cli && node scripts/capture-demo.mjs",
+    build: "bun run typecheck && bun run --filter @observatory/web build",
+    "build:server": "esbuild apps/server/src/index.ts --bundle --platform=node --format=esm --external:ws --outfile=apps/server/dist/index.js",
+    "build:cli": "bun run build && bun run build:server",
+    typecheck: "tsc -b --pretty false",
+    test: "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "node scripts/run-e2e.mjs",
+    prepack: "bun run build:cli"
+  },
+  dependencies: {
+    ws: "^8.18.3"
+  },
+  devDependencies: {
+    "@playwright/test": "^1.55.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.1.0",
+    concurrently: "^10.0.5",
+    esbuild: "^0.28.2",
+    jsdom: "^30.0.1",
+    tsx: "^4.20.5",
+    typescript: "^7.0.2",
+    vite: "^8.2.2",
+    vitest: "^4.1.11"
+  }
+};
+
+// apps/server/src/version.ts
+var OBSERVATORY_VERSION = package_default.version;
+
 // apps/server/src/claude-adapter.ts
 var TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
 var DEFAULT_POLL_INTERVAL_MS = 2e3;
@@ -873,7 +952,7 @@ var ClaudeCodeAdapter = class {
     return {
       adapter: "claude",
       provider: "claude",
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       claudeCliVersion: this.#version,
       experimentalApi: false,
       discoveryStrategy: "compatibility",
@@ -2494,7 +2573,7 @@ var RealCodexAdapter = class {
     return {
       adapter: "codex",
       provider: this.provider,
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: this.#experimental,
@@ -2608,7 +2687,7 @@ var RealCodexAdapter = class {
         clientInfo: {
           name: "codex_agent_observatory",
           title: "Codex Agent Observatory",
-          version: "0.1.0"
+          version: OBSERVATORY_VERSION
         },
         capabilities: {
           experimentalApi: true,
@@ -3194,7 +3273,7 @@ var MockCodexAdapter = class {
     return {
       adapter: "mock",
       provider: this.provider,
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
       discoveryStrategy: "mock",
@@ -4333,7 +4412,7 @@ var SharedStateCodexAdapter = class {
     return {
       adapter: "codex",
       provider: this.provider,
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
