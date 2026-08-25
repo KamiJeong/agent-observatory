@@ -447,7 +447,7 @@ export function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <span className="brand__mark" aria-hidden="true">⌁</span>
+          <span className="brand__mark" aria-hidden="true" />
           <div>
             <h1>Agent Observatory</h1>
             <span>{snapshot.runtime.adapter === "mock" ? `Mock · ${snapshot.runtime.scenario?.toUpperCase() ?? "A"}` : "Local multi-agent runtime"}</span>
