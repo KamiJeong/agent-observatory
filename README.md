@@ -110,14 +110,16 @@ workflow is running locally.
 codex --version
 claude --version
 bun run dev:real
-bun run dev:real -- --provider codex,claude
+bun run dev:real -- --provider codex
+bun run dev:real -- --provider claude
 ```
 
 The development launcher opens the authenticated dashboard automatically when
-possible. Otherwise, open the printed `Dashboard bootstrap` URL. By default,
-the shared compatibility transport discovers all active Codex working
-directories observable on the current machine. Use `--no-open` to suppress the
-browser launch.
+possible. Otherwise, open the printed `Dashboard bootstrap` URL. It observes
+Codex and Claude by default; `--provider codex` or `--provider claude` limits the
+run to one provider. The shared compatibility transport discovers all active
+Codex working directories observable on the current machine. Use `--no-open` to
+suppress the browser launch.
 
 To view only one project, specify its exact working directory. The development
 launcher accepts the same scope on Linux, macOS, PowerShell, and Command Prompt.
@@ -265,7 +267,7 @@ provider selected with `--provider`.
 
 ```bash
 bun run dev          # server :4317 + Vite :4318, Mock scenario A
-bun run dev:real     # Real Mode launcher; opens an authenticated local session
+bun run dev:real     # Real Mode launcher; observes Codex + Claude by default
 bun run typecheck
 bun run test
 bun run test:e2e
@@ -332,7 +334,7 @@ Environment options:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OBSERVATORY_ADAPTER` | `mock` | Set to `real` for provider-backed Real Mode |
-| `OBSERVATORY_PROVIDERS` | `codex` | `codex`, `claude`, or comma-separated providers |
+| `OBSERVATORY_PROVIDERS` | `codex` in the server; `codex,claude` in `dev:real` | `codex`, `claude`, or comma-separated providers |
 | `OBSERVATORY_PORT` | `4317` | Backend HTTP/WebSocket port |
 | `OBSERVATORY_CWD` | `all` in shared mode | Exact cwd filter; use `all` to disable |
 | `OBSERVATORY_ROOT_THREAD_ID` | unset | Include one root plus its descendants |

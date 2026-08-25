@@ -29,6 +29,8 @@ for (let index = 2; index < process.argv.length; index += 1) {
   env[environmentName] = value;
   index += 1;
 }
+env.OBSERVATORY_PROVIDERS ??= "codex,claude";
+console.log(`Real Mode providers: ${env.OBSERVATORY_PROVIDERS}`);
 const command = { file: "bun", args: ["run", "dev"] };
 const child = spawn(command.file, command.args, { env, stdio: ["inherit", "pipe", "pipe"] });
 const shouldOpen = openPreference ?? (Boolean(process.stdout.isTTY) && !process.env.CI);
