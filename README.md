@@ -44,34 +44,41 @@ data. Reproduce it with `bunx agent-observatory --scenario demo`.
 
 ### Run directly with bunx
 
-Run without installing the npm package separately. The default is Mock Mode,
-which works without either provider CLI and opens a browser automatically.
+Run without installing the npm package separately. The default is Real Mode
+with both Codex and Claude selected, and it opens a browser automatically.
 
 ```bash
 bunx agent-observatory
 ```
 
-Use Real Mode to observe Codex, Claude Code, or both on the current machine.
+Limit Real Mode to one provider when needed. The explicit `--real` flag remains
+available for compatibility, but is no longer required.
 
 ```bash
-bunx agent-observatory --real
-bunx agent-observatory --real --provider claude
+bunx agent-observatory --provider codex
+bunx agent-observatory --provider claude
 bunx agent-observatory --real --provider all
 ```
 
-For backward compatibility, `--real` defaults to Codex. Use `--provider all`
-for the combined dashboard.
+Use explicit Mock Mode when no provider CLI or live session is required.
+
+```bash
+bunx agent-observatory --mock
+bunx agent-observatory --scenario demo
+```
 
 You can also limit observation to a specific working directory or disable
 automatic browser launch.
 
 ```bash
-bunx agent-observatory --real --cwd /absolute/path/to/project
+bunx agent-observatory --cwd /absolute/path/to/project
 bunx agent-observatory --scenario stress --no-open
 ```
 
-The default address is <http://127.0.0.1:4317>. Run
-`bunx agent-observatory --help` to see all options.
+The preferred default address is <http://127.0.0.1:4317>. If that port is
+already in use, the CLI selects the next available port and prints the final
+bootstrap URL. An explicitly supplied `--port` never falls back silently.
+Run `bunx agent-observatory --help` to see all options.
 
 ### Package registry
 
@@ -259,8 +266,9 @@ detected interactive Codex process, and records that approximation in Debug.
 - macOS: the system `ps` and `lsof` commands
 - Windows: Windows PowerShell with CIM available
 
-Mock Mode does not require either agent CLI. Real Mode requires only the
-provider selected with `--provider`.
+Mock Mode does not require either agent CLI. Combined Real Mode reports Codex
+and Claude health independently, so one unavailable provider does not hide the
+other. Use `--provider` to require only one runtime.
 
 ## Development
 
