@@ -61,4 +61,15 @@ describe("dev:real launcher", () => {
     expect(environmentOverride.status).toBe(0);
     expect(environmentOverride.payload?.providers).toBe("codex");
   });
+
+  it("normalizes provider order and rejects unsupported providers before starting Bun", () => {
+    const normalized = runLauncher([], "claude,codex");
+    expect(normalized.status).toBe(0);
+    expect(normalized.payload?.providers).toBe("codex,claude");
+
+    const invalid = runLauncher(["--provider", "unknown"]);
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toContain("Invalid Real Mode provider selection");
+    expect(invalid.payload).toBeUndefined();
+  });
 });
