@@ -10,7 +10,8 @@ CI checks before merge.
 2. Create a short-lived branch from the latest `main`.
 3. Make the change, add tests, and run the local checks.
 4. Open a pull request using the repository template.
-5. Resolve review comments and wait for the `Quality` and `E2E` checks.
+5. Resolve review comments and wait for the `Quality`, `E2E`, and
+   `CodeQL analysis` checks.
 6. Squash-merge after approval and all required checks pass.
 
 Use these branch prefixes:
@@ -42,6 +43,33 @@ Keep pull requests focused. Update documentation when commands, configuration,
 protocol compatibility, or supported platforms change. Never include tokens,
 private prompts, or user-specific Codex data in fixtures, logs, screenshots, or
 issues.
+
+## CodeQL merge protection
+
+The advanced CodeQL workflow analyzes JavaScript and TypeScript on pushes to
+`main`, pull requests targeting `main`, merge groups, and a weekly schedule. All
+Action references use reviewed full commit SHAs. The workflow uses the
+`pull_request` event so public fork contributions run with a read-only
+`GITHUB_TOKEN` and without repository secrets; do not replace it with
+`pull_request_target` or add secrets to the analysis job.
+
+Merging requires both the stable `CodeQL analysis` job and a CodeQL
+code-scanning result. The repository ruleset blocks an analysis that is missing
+or still running, as well as security alerts rated high or critical. A failed
+workflow also blocks the required `CodeQL analysis` status check.
+
+If CodeQL does not report on a pull request:
+
+1. Check whether GitHub is waiting for a maintainer to approve a first-time
+   contributor's fork workflow. Approval starts the unprivileged workflow; it
+   is not a ruleset bypass.
+2. Confirm the workflow is triggered by `pull_request` and that the job retains
+   `contents: read` and `security-events: write`. GitHub downgrades the token for
+   fork pull requests while the CodeQL Action handles the pull-request upload.
+3. Open the `CodeQL` run and inspect the initialization, extraction, and SARIF
+   upload steps. Rerun a transient failure instead of bypassing merge protection.
+4. If an alert blocks the pull request, resolve or dismiss it with a documented
+   reason in the code-scanning alert UI. Do not remove the required check.
 
 ## Release flow
 
