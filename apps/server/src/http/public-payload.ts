@@ -8,13 +8,10 @@ import type {
   RuntimeProvider,
   ThreadSnapshot,
 } from "@observatory/core";
-
-function captureContent(): boolean {
-  return process.env.OBSERVATORY_CAPTURE_CONTENT === "1";
-}
+import { contentCaptureEnabled } from "../content-capture.ts";
 
 function mayExpose(provider: RuntimeProvider | undefined): boolean {
-  return captureContent() || provider === "mock";
+  return contentCaptureEnabled() || provider === "mock";
 }
 
 function publicMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {

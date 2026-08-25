@@ -18,6 +18,7 @@ class TestRuntimeAdapter implements AgentRuntimeAdapter {
   constructor(
     readonly provider: RuntimeProvider,
     readonly shouldFail = false,
+    readonly contentCapture?: RuntimeInfo["contentCapture"],
   ) {
     this.mode = provider;
   }
@@ -52,6 +53,7 @@ class TestRuntimeAdapter implements AgentRuntimeAdapter {
       observatoryVersion: "test",
       experimentalApi: false,
       discoveryStrategy: "compatibility",
+      ...(this.contentCapture ? { contentCapture: this.contentCapture } : {}),
     };
   }
 
@@ -65,6 +67,20 @@ class TestRuntimeAdapter implements AgentRuntimeAdapter {
 }
 
 describe("CompositeRuntimeAdapter", () => {
+  it("uses metadata-only policy when any selected provider does", () => {
+    const enabled = new CompositeRuntimeAdapter([
+      new TestRuntimeAdapter("codex", false, "enabled"),
+      new TestRuntimeAdapter("claude", false, "enabled"),
+    ]);
+    const mixed = new CompositeRuntimeAdapter([
+      new TestRuntimeAdapter("codex", false, "enabled"),
+      new TestRuntimeAdapter("claude", false, "metadata-only"),
+    ]);
+
+    expect(enabled.runtimeInfo().contentCapture).toBe("enabled");
+    expect(mixed.runtimeInfo().contentCapture).toBe("metadata-only");
+  });
+
   it("merges providers without ID collisions", async () => {
     const codex = new TestRuntimeAdapter("codex");
     const claude = new TestRuntimeAdapter("claude");

@@ -30,6 +30,7 @@ import {
   type ClaudeTeamMessageEvidence,
   type ClaudeTeamObservation,
 } from "./claude-team-observer.ts";
+import { contentCaptureEnabled } from "./content-capture.ts";
 
 const TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -55,6 +56,7 @@ interface ClaudeTranscriptContext {
   createdAt?: number;
   updatedAt?: number;
   meta?: ClaudeSubagentMeta;
+  captureContent?: boolean;
 }
 
 export interface ParsedClaudeTranscript {
@@ -179,9 +181,24 @@ function addUsage(total: Required<TokenUsageSnapshot>, usage: JsonRecord): void 
   total.modelContextWindow += 0;
 }
 
+function boundedMessageText(content: unknown): string | undefined {
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content.flatMap((item) => {
+          const block = recordValue(item);
+          return block?.type === "text" && typeof block.text === "string" ? [block.text] : [];
+        }).join("\n\n")
+      : "";
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > 2_000 ? `${trimmed.slice(0, 1_999)}…` : trimmed;
+}
+
 /**
- * Parse Claude Code's local JSONL compatibility format without retaining prompt,
- * response, thinking, command, path, or tool-input contents.
+ * Parse Claude Code's local JSONL compatibility format. Prompt and final-response
+ * text is retained only when bounded content capture is explicitly enabled;
+ * thinking, command, path, tool-input, and tool-result contents are never retained.
  *
  * This is deliberately tolerant: unknown records and malformed lines are ignored,
  * because the on-disk format is not a public stability contract.
@@ -225,6 +242,7 @@ export function parseClaudeTranscript(text: string, context: ClaudeTranscriptCon
       hasUsage = true;
     }
     const content = Array.isArray(message?.content) ? message.content : [];
+    const capturedText = context.captureContent ? boundedMessageText(message?.content) : undefined;
 
     if (role === "assistant") {
       let hasText = false;
@@ -272,6 +290,7 @@ export function parseClaudeTranscript(text: string, context: ClaudeTranscriptCon
           kind: "delivery",
           actor: { type: "agent", id: context.threadId },
           summary: "Agent response",
+          ...(capturedText ? { content: capturedText } : {}),
           status: "sent",
           occurredAt: at ?? lastTimestamp ?? Date.now(),
           source: "transcript",
@@ -304,6 +323,7 @@ export function parseClaudeTranscript(text: string, context: ClaudeTranscriptCon
             actor: { type: "human" },
             recipients: [{ type: "agent", id: context.threadId }],
             summary: "User request",
+            ...(capturedText ? { content: capturedText } : {}),
             status: "sent",
             occurredAt: at ?? lastTimestamp ?? Date.now(),
             source: "transcript",
@@ -341,7 +361,7 @@ export function parseClaudeTranscript(text: string, context: ClaudeTranscriptCon
       provider: "claude",
       observation: "transcript",
       schema: "compatibility",
-      contentCaptured: false,
+      contentCaptured: context.captureContent === true,
       agentKind: context.isRoot ? "session" : "subagent",
     },
     evidenceSources: ["transcript"],
@@ -740,6 +760,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   readonly #pollIntervalMs: number;
   readonly #now: () => number;
   readonly #processDiscovery: () => ClaudeProcessDiscovery;
+  readonly #captureContent: boolean;
 
   constructor(options: ClaudeAdapterOptions = {}) {
     const environment = options.environment ?? process.env;
@@ -752,6 +773,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
     this.#pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.#now = options.now ?? Date.now;
     this.#processDiscovery = options.processDiscovery ?? findInteractiveClaudeCwds;
+    this.#captureContent = contentCaptureEnabled(environment);
   }
 
   runtimeInfo(): RuntimeInfo {
@@ -762,7 +784,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       claudeCliVersion: this.#version,
       experimentalApi: false,
       discoveryStrategy: "compatibility",
-      contentCapture: "metadata-only",
+      contentCapture: this.#captureContent ? "enabled" : "metadata-only",
     };
   }
 
@@ -888,6 +910,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
           processActive,
           createdAt: rootTail.stat.birthtimeMs || undefined,
           updatedAt: rootTail.stat.mtimeMs,
+          captureContent: this.#captureContent,
         });
         results.push({ ...root, path });
 
@@ -920,6 +943,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
             createdAt: tail.stat.birthtimeMs || undefined,
             updatedAt: tail.stat.mtimeMs,
             meta,
+            captureContent: this.#captureContent,
           });
           parsedAgents.push({ observed: { ...parsed, path: agentPath }, meta });
         }

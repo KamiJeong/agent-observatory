@@ -62,6 +62,9 @@ export class CompositeRuntimeAdapter implements AgentRuntimeAdapter {
       observatoryVersion: providers[0]?.observatoryVersion ?? "unknown",
       experimentalApi: providers.some((runtime) => runtime.experimentalApi),
       discoveryStrategy: "composite",
+      contentCapture: providers.every((runtime) => runtime.contentCapture === "enabled")
+        ? "enabled"
+        : "metadata-only",
       providers,
     };
   }

@@ -26,6 +26,7 @@ import type {
   ThreadSnapshot,
   TokenUsageSnapshot,
 } from "@observatory/core";
+import { contentCapturePolicy } from "./content-capture.ts";
 import {
   discoverInteractiveCodexProcesses,
   selectRootThreadIds,
@@ -574,6 +575,7 @@ export class SharedStateCodexAdapter implements AgentRuntimeAdapter {
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
       discoveryStrategy: "compatibility",
+      contentCapture: contentCapturePolicy(),
     };
   }
 

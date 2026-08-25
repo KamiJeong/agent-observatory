@@ -71,6 +71,24 @@ describe("Claude transcript compatibility parser", () => {
     expect(JSON.stringify(parsed)).not.toContain("private");
   });
 
+  it("retains only bounded request and final-response text with explicit content capture", () => {
+    const parsed = parseClaudeTranscript(fixture("root.jsonl"), {
+      threadId: "claude:session-1",
+      sessionId: "session-1",
+      isRoot: true,
+      processActive: true,
+      captureContent: true,
+    });
+
+    expect(parsed.history.map((event) => event.content)).toEqual([
+      "private prompt must not escape",
+      "private response must not escape",
+    ]);
+    expect(JSON.stringify(parsed)).not.toContain("private delegation");
+    expect(JSON.stringify(parsed)).not.toContain("private result");
+    expect(parsed.snapshot.source).toMatchObject({ contentCaptured: true });
+  });
+
   it("ignores malformed and future records", () => {
     const parsed = parseClaudeTranscript([
       "not-json",
@@ -193,6 +211,13 @@ describe("Claude agent-team compatibility evidence", () => {
 });
 
 describe("Claude adapter", () => {
+  it("advertises the configured content-capture policy", () => {
+    expect(new ClaudeCodeAdapter({ environment: {} }).runtimeInfo().contentCapture).toBe("metadata-only");
+    expect(new ClaudeCodeAdapter({
+      environment: { OBSERVATORY_CAPTURE_CONTENT: "1" },
+    }).runtimeInfo().contentCapture).toBe("enabled");
+  });
+
   it("uses the preserved launcher cwd instead of the nested server cwd", async () => {
     const claudeHome = temporaryDirectory();
     const projectDir = join(claudeHome, "projects", "-workspace-demo");

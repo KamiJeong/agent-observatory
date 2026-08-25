@@ -15,7 +15,7 @@ function runLauncher(args: string[] = [], providers?: string) {
   const fakeBun = join(binDirectory, "bun");
   writeFileSync(fakeBun, [
     "#!/bin/sh",
-    "printf '{\"providers\":\"%s\",\"adapter\":\"%s\",\"launchCwd\":\"%s\",\"cwdFilter\":\"%s\",\"args\":\"%s\"}\\n' \"$OBSERVATORY_PROVIDERS\" \"$OBSERVATORY_ADAPTER\" \"$OBSERVATORY_LAUNCH_CWD\" \"$OBSERVATORY_CWD\" \"$*\"",
+    "printf '{\"providers\":\"%s\",\"adapter\":\"%s\",\"launchCwd\":\"%s\",\"cwdFilter\":\"%s\",\"captureContent\":\"%s\",\"args\":\"%s\"}\\n' \"$OBSERVATORY_PROVIDERS\" \"$OBSERVATORY_ADAPTER\" \"$OBSERVATORY_LAUNCH_CWD\" \"$OBSERVATORY_CWD\" \"$OBSERVATORY_CAPTURE_CONTENT\" \"$*\"",
   ].join("\n"));
   chmodSync(fakeBun, 0o755);
 
@@ -26,6 +26,7 @@ function runLauncher(args: string[] = [], providers?: string) {
   };
   if (providers === undefined) delete env.OBSERVATORY_PROVIDERS;
   else env.OBSERVATORY_PROVIDERS = providers;
+  delete env.OBSERVATORY_CAPTURE_CONTENT;
   const result = spawnSync(process.execPath, [launcherPath, ...args], {
     cwd: repositoryRoot,
     env,
@@ -52,8 +53,16 @@ describe("dev:real launcher", () => {
       adapter: "real",
       launchCwd: repositoryRoot,
       cwdFilter: "",
+      captureContent: "",
       args: "run dev",
     });
+  });
+
+  it("enables bounded provider content with an explicit flag", () => {
+    const result = runLauncher(["--capture-content", "--no-open"]);
+
+    expect(result.status).toBe(0);
+    expect(result.payload?.captureContent).toBe("1");
   });
 
   it.each(["codex", "claude", "codex,claude"])("preserves the explicit %s CLI provider override", (providers) => {

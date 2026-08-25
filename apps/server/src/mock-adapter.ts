@@ -128,6 +128,7 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
       experimentalApi: false,
       discoveryStrategy: "mock",
       scenario: this.#scenario,
+      contentCapture: "enabled",
     };
   }
 
@@ -236,12 +237,18 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
     this.#emit({ type: "thread.discovered", at: Date.now(), thread });
   }
 
-  #activity(agentId: string, id: string, kind: AgentActivity["kind"], title: string, detail?: string): void {
-    const now = Date.now();
+  #activity(
+    agentId: string,
+    id: string,
+    kind: AgentActivity["kind"],
+    title: string,
+    detail?: string,
+    startedAt = Date.now(),
+  ): void {
     this.#emit({
       type: "activity.started",
-      at: now,
-      activity: { id, agentId, kind, title, ...(detail ? { detail } : {}), startedAt: now },
+      at: startedAt,
+      activity: { id, agentId, kind, title, ...(detail ? { detail } : {}), startedAt },
     });
   }
 
@@ -409,34 +416,34 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
       recipients: [{ type: "agent", id: "codex:demo-orchestrator" }],
       summary: "Multi-provider release requested",
       content: "Coordinate implementation and verification across Codex and Claude Code.",
-      status: "completed", occurredAt: now, source: "mock",
+      status: "completed", occurredAt: now - 50, source: "mock",
     });
     this.#history({
       id: "demo-plan", kind: "decision", actor: { type: "agent", id: "codex:demo-orchestrator" },
       summary: "Release plan confirmed",
       content: "Build the runtime, review privacy, then complete browser verification.",
-      status: "completed", occurredAt: now + 1, source: "mock",
+      status: "completed", occurredAt: now - 40, source: "mock",
     });
     this.#history({
       id: "demo-provider-handoff", kind: "handoff", relationKind: "handoff",
       actor: { type: "agent", id: "codex:demo-orchestrator" },
       recipients: [{ type: "agent", id: "claude:demo-lead" }],
       summary: "Claude review requested", content: "Validate compatibility evidence and privacy boundaries.",
-      status: "sent", occurredAt: now + 2, source: "mock",
+      status: "sent", occurredAt: now - 30, source: "mock",
     });
     this.#history({
       id: "demo-team-task", kind: "handoff", relationKind: "task",
       actor: { type: "agent", id: "claude:demo-lead" },
       recipients: [{ type: "agent", id: "claude:demo-reviewer" }],
       summary: "Privacy review assigned", content: "Confirm metadata-only payload behavior.",
-      status: "sent", occurredAt: now + 3, source: "mock",
+      status: "sent", occurredAt: now - 20, source: "mock",
     });
     this.#history({
       id: "demo-peer-message", kind: "handoff", relationKind: "message",
       actor: { type: "agent", id: "claude:demo-reviewer" },
       recipients: [{ type: "agent", id: "codex:demo-builder" }],
       summary: "Review evidence shared", content: "Raw provider content remains outside the public payload.",
-      status: "sent", occurredAt: now + 4, source: "mock",
+      status: "sent", occurredAt: now + 10, source: "mock",
     });
     this.#emit({
       type: "token.updated",
@@ -451,20 +458,28 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
         modelContextWindow: 258_400,
       },
     });
-    this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout");
-    this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts");
-    this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence");
-    this.#activity("claude:demo-reviewer", "demo-privacy", "test", "Checking privacy boundary", "provider content redaction");
+    this.#activity("codex:demo-orchestrator", "demo-coordinate", "message", "Coordinating provider rollout", undefined, now + 15);
+    this.#activity("codex:demo-builder", "demo-build", "write", "Implementing composite runtime", "apps/server/src/composite-adapter.ts", now + 20);
+    this.#activity("claude:demo-lead", "demo-lead-review", "read", "Reviewing Agent Teams evidence", "metadata-only compatibility evidence", now + 21);
+    this.#activity("claude:demo-reviewer", "demo-privacy", "test", "Checking privacy boundary", "provider content redaction", now + 22);
+    this.#history({
+      id: "demo-build-result", kind: "delivery",
+      actor: { type: "agent", id: "codex:demo-builder" },
+      recipients: [{ type: "agent", id: "codex:demo-orchestrator" }],
+      summary: "Runtime implementation completed",
+      content: "Composite provider observation and privacy safeguards are ready for verification.",
+      status: "completed", occurredAt: now + 30, source: "mock",
+    });
     this.#emit({
-      type: "request.opened", at: now + 5,
+      type: "request.opened", at: now + 40,
       request: {
         id: "demo-browser-approval", agentId: "codex:demo-tester", reason: "approval",
         title: "Browser verification approval", detail: "Run the deterministic demo capture",
-        openedAt: now + 5, evidenceSource: "mock",
+        openedAt: now + 40, evidenceSource: "mock",
       },
     });
     this.#emit({
-      type: "agent.lifecycle", at: now + 6,
+      type: "agent.lifecycle", at: now + 50,
       threadId: "claude:demo-researcher", status: "completed",
     });
   }

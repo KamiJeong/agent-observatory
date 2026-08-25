@@ -5,8 +5,89 @@ import { agentBranchIds, historyEventIsInBranch } from "./agent-scope.ts";
 
 export type RunHistoryMode = "story" | "messages";
 
-const STORY_KINDS: HistoryEvent["kind"][] = ["request", "decision", "handoff", "delivery", "completion"];
+const STORY_KINDS: HistoryEvent["kind"][] = ["request", "decision", "work", "handoff", "delivery", "completion"];
 const MESSAGE_KINDS: HistoryEvent["kind"][] = ["request", "handoff", "delivery"];
+
+interface StoryEvent extends HistoryEvent {
+  basis?: HistoryEvent;
+  workSteps?: HistoryEvent[];
+}
+
+function agentId(actor: HistoryActor): string | undefined {
+  return actor.type === "agent" ? actor.id : undefined;
+}
+
+function eventAddressesAgent(event: HistoryEvent, id: string): boolean {
+  return (event.recipients ?? []).some((recipient) => agentId(recipient) === id);
+}
+
+function observedBasis(events: HistoryEvent[], work: HistoryEvent): HistoryEvent | undefined {
+  const id = agentId(work.actor);
+  if (!id) return undefined;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event) continue;
+    if (
+      (event.kind === "decision" && agentId(event.actor) === id)
+      || (event.kind === "handoff" && eventAddressesAgent(event, id))
+      || (event.kind === "request" && event.actor.type === "human" && eventAddressesAgent(event, id))
+    ) return event;
+  }
+  return undefined;
+}
+
+function storyEvents(events: HistoryEvent[]): StoryEvent[] {
+  const result: StoryEvent[] = [];
+  const observed: HistoryEvent[] = [];
+  const workGroups = new Map<string, StoryEvent>();
+  for (const event of events) {
+    if (event.kind !== "work") {
+      result.push(event);
+      observed.push(event);
+      continue;
+    }
+    const basis = observedBasis(observed, event);
+    const actor = agentId(event.actor) ?? "unknown";
+    const groupKey = `${actor}:${event.turnId ?? "no-turn"}:${basis?.id ?? Math.floor(event.occurredAt / 300_000)}`;
+    const existing = workGroups.get(groupKey);
+    if (existing) {
+      existing.workSteps?.push(event);
+      existing.status = event.status ?? existing.status;
+      continue;
+    }
+    const grouped: StoryEvent = {
+      ...event,
+      id: `story-execution:${groupKey}`,
+      summary: "Observed execution",
+      ...(basis ? { basis } : {}),
+      workSteps: [event],
+    };
+    workGroups.set(groupKey, grouped);
+    result.push(grouped);
+  }
+  return result;
+}
+
+function phaseLabel(event: HistoryEvent): string {
+  if (event.kind === "request") return event.actor.type === "human" ? "Request" : "Approval";
+  if (event.kind === "decision") return "Decision";
+  if (event.kind === "work") return "Execution";
+  if (event.kind === "handoff") return "Handoff";
+  if (event.kind === "delivery") return "Result";
+  return "Completion";
+}
+
+function capturePolicy(snapshot: ObservatorySnapshot, branchIds: Set<string>): "metadata-only" | "enabled" | undefined {
+  const providers = new Set([...branchIds].map((id) => snapshot.agents[id]?.provider).filter(Boolean));
+  const providerPolicies = (snapshot.runtime.providers ?? [])
+    .filter((runtime) => providers.has(runtime.provider))
+    .map((runtime) => runtime.contentCapture)
+    .filter((policy): policy is "metadata-only" | "enabled" => policy !== undefined);
+  if (providerPolicies.length > 0) {
+    return providerPolicies.every((policy) => policy === "enabled") ? "enabled" : "metadata-only";
+  }
+  return snapshot.runtime.contentCapture;
+}
 
 function actorLabel(actor: HistoryActor, snapshot: ObservatorySnapshot): string {
   if (actor.type === "human") return "Human";
@@ -55,6 +136,33 @@ function HistoryContent({ content }: { content: string }) {
   );
 }
 
+function ExecutionDetail({ event }: { event: StoryEvent }) {
+  const uniqueSteps = [...new Map((event.workSteps ?? []).map((step) => [
+    `${step.summary}:${step.content ?? ""}`,
+    step,
+  ])).values()];
+  const shownSteps = uniqueSteps.slice(0, 3);
+  return <>
+    {event.basis && (
+      <p className="history-event__basis">
+        <span>Observed basis</span>
+        {phaseLabel(event.basis)} · {event.basis.summary}
+      </p>
+    )}
+    <ul className="history-event__steps" aria-label={`${uniqueSteps.length} observed execution steps`}>
+      {shownSteps.map((step) => (
+        <li key={step.id}>
+          <span>{step.summary}</span>
+          {step.content && <small>{step.content}</small>}
+        </li>
+      ))}
+    </ul>
+    {uniqueSteps.length > shownSteps.length && (
+      <small className="history-event__more">+{uniqueSteps.length - shownSteps.length} more in Timeline</small>
+    )}
+  </>;
+}
+
 export function RunHistory({
   snapshot,
   selectedId,
@@ -65,15 +173,26 @@ export function RunHistory({
   mode?: RunHistoryMode;
 }) {
   const branchIds = useMemo(() => agentBranchIds(snapshot, selectedId), [selectedId, snapshot.agents]);
-  const events = useMemo(() => [...snapshot.history]
-    .filter((event) => historyEventIsInBranch(event, branchIds))
-    .filter((event) => (mode === "story" ? STORY_KINDS : MESSAGE_KINDS).includes(event.kind))
-    .filter((event) => event.kind !== "delivery" || event.source !== "derived")
-    .sort((a, b) => a.occurredAt - b.occurredAt), [branchIds, mode, snapshot.history]);
+  const events = useMemo(() => {
+    const filtered = [...snapshot.history]
+      .filter((event) => historyEventIsInBranch(event, branchIds))
+      .filter((event) => (mode === "story" ? STORY_KINDS : MESSAGE_KINDS).includes(event.kind))
+      .filter((event) => event.kind !== "delivery" || event.source !== "derived")
+      .sort((a, b) => a.occurredAt - b.occurredAt);
+    return mode === "story" ? storyEvents(filtered) : filtered;
+  }, [branchIds, mode, snapshot.history]);
+  const contentPolicy = capturePolicy(snapshot, branchIds);
 
   return (
-    <ol className="run-history" aria-label={`${mode === "story" ? "Run history" : "Messages"}, ${events.length} events`}>
-      {events.map((event) => {
+    <div className="run-history-shell">
+      {mode === "story" && selectedId && contentPolicy === "metadata-only" && (
+        <aside className="run-history__privacy" role="note">
+          <strong>Content privacy is on</strong>
+          <span>Story shows observed metadata. Restart with <code>bun run dev:real -- --capture-content</code> to include bounded request and result text.</span>
+        </aside>
+      )}
+      <ol className="run-history" aria-label={`${mode === "story" ? "Run history" : "Messages"}, ${events.length} events`}>
+        {events.map((event) => {
         const style = {
           "--history-color": actorColor(event.actor, snapshot),
         } as CSSProperties;
@@ -84,6 +203,10 @@ export function RunHistory({
               <i className="history-event__node" />
             </span>
             <article>
+              <div className="history-event__phase">
+                <span>{phaseLabel(event)}</span>
+                <small>Evidence · {event.source}</small>
+              </div>
               <div className="history-event__meta">
                 <HistoryRoute event={event} snapshot={snapshot} />
                 <span className={`history-event__status history-event__status--${event.status ?? "recorded"}`}>
@@ -91,19 +214,22 @@ export function RunHistory({
                 </span>
               </div>
               <strong className="history-event__summary">{event.summary}</strong>
-              {event.content && <HistoryContent content={event.content} />}
+              {event.kind === "work"
+                ? <ExecutionDetail event={event} />
+                : event.content && <HistoryContent content={event.content} />}
             </article>
           </li>
         );
-      })}
-      {events.length === 0 && (
-        <li className="run-history__empty">
-          {selectedId ? "No narrative history for this agent branch yet." : "Select an agent to view its run history."}
-          <small>{selectedId
-            ? "Timeline may still contain low-level execution activity."
-            : "History is scoped to the selected agent and its children."}</small>
-        </li>
-      )}
-    </ol>
+        })}
+        {events.length === 0 && (
+          <li className="run-history__empty">
+            {selectedId ? "No narrative history for this agent branch yet." : "Select an agent to view its run history."}
+            <small>{selectedId
+              ? "Timeline may still contain low-level execution activity."
+              : "History is scoped to the selected agent and its children."}</small>
+          </li>
+        )}
+      </ol>
+    </div>
   );
 }
