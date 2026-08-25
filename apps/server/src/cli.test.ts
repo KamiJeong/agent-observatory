@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { resolveRuntimeConfiguration, selectAvailablePort } from "../../../bin/cli-runtime.js";
 
 const cliPath = fileURLToPath(new URL("../../../bin/agent-observatory.js", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -28,14 +29,84 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<v
 }
 
 describe("agent-observatory CLI", () => {
+  it("defaults to Real Mode with Codex and Claude while preserving explicit Mock Mode", () => {
+    expect(resolveRuntimeConfiguration({})).toEqual({ adapter: "real", providers: "codex,claude" });
+    expect(resolveRuntimeConfiguration({ real: true })).toEqual({ adapter: "real", providers: "codex,claude" });
+    expect(resolveRuntimeConfiguration({ provider: "codex" })).toEqual({ adapter: "real", providers: "codex" });
+    expect(resolveRuntimeConfiguration({ mock: true })).toEqual({ adapter: "mock", providers: undefined });
+    expect(resolveRuntimeConfiguration({ scenario: "demo" })).toEqual({ adapter: "mock", providers: undefined });
+    expect(() => resolveRuntimeConfiguration({ real: true, mock: true })).toThrow("Use either --real or --mock");
+    expect(() => resolveRuntimeConfiguration({ real: true, scenario: "demo" })).toThrow("scenarios run in Mock Mode");
+  });
+
+  it("falls back from an occupied preferred port but honors an explicit port", async () => {
+    const occupied = createServer();
+    await new Promise<void>((resolve, reject) => {
+      occupied.once("error", reject);
+      occupied.listen(0, "127.0.0.1", resolve);
+    });
+    const address = occupied.address();
+    const occupiedPort = typeof address === "object" && address ? address.port : 0;
+    try {
+      await expect(selectAvailablePort(occupiedPort)).resolves.not.toBe(occupiedPort);
+      await expect(selectAvailablePort(occupiedPort, { allowFallback: false }))
+        .rejects.toThrow(`Port ${occupiedPort} is already in use.`);
+    } finally {
+      await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("starts the combined Codex and Claude runtime by default", async () => {
+    const port = await findFreePort();
+    const child = spawn(process.execPath, [cliPath, "--port", String(port), "--no-open"], {
+      cwd: repositoryRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    try {
+      await waitUntil(async () => {
+        try {
+          return (await fetch(`http://127.0.0.1:${port}/api/health`)).ok;
+        } catch {
+          return false;
+        }
+      });
+      await waitUntil(() => /\?token=[A-Za-z0-9_-]{40,}/.test(stdout));
+      const token = stdout.match(/\?token=([A-Za-z0-9_-]{40,})/)?.[1] ?? "";
+      const bootstrap = await fetch(`http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`, {
+        redirect: "manual",
+      });
+      const sessionCookie = bootstrap.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+      const response = await fetch(`http://127.0.0.1:${port}/api/snapshot`, {
+        headers: { cookie: sessionCookie },
+      });
+      const snapshot = await response.json();
+
+      expect(snapshot.runtime.adapter).toBe("composite");
+      expect(snapshot.runtime.providers.map((provider: { provider: string }) => provider.provider))
+        .toEqual(["codex", "claude"]);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGTERM");
+        await exited;
+      }
+    }
+  }, 10_000);
+
   it("documents provider selection and rejects unsupported providers", () => {
     const help = spawnSync(process.execPath, [cliPath, "--help"], {
       cwd: repositoryRoot,
       encoding: "utf8",
     });
     expect(help.status).toBe(0);
+    expect(help.stdout).toContain("--mock");
     expect(help.stdout).toContain("--provider <name>");
-    expect(help.stdout).toContain("--real --provider all");
+    expect(help.stdout).toContain("codex, claude, or all (default: all)");
     expect(help.stdout).toContain("--scenario demo");
 
     const invalid = spawnSync(process.execPath, [cliPath, "--real", "--provider", "unknown"], {
@@ -52,6 +123,7 @@ describe("agent-observatory CLI", () => {
       cliPath,
       "--port",
       String(port),
+      "--mock",
       "--open",
     ], {
       cwd: repositoryRoot,
