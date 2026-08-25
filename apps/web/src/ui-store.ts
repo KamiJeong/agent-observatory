@@ -47,13 +47,13 @@ class UiStore {
     if (this.#retryTimer) clearTimeout(this.#retryTimer);
     this.#socket?.close();
     this.#socket = undefined;
-    void fetch("/api/retry", { method: "POST" }).catch(() => undefined);
+    void fetch("/api/retry", { method: "POST", headers: this.#authHeaders() }).catch(() => undefined);
     this.#openSocket();
   }
 
   async #loadInitial(): Promise<void> {
     try {
-      const response = await fetch("/api/snapshot");
+      const response = await fetch("/api/snapshot", { headers: this.#authHeaders() });
       if (!response.ok) return;
       this.#set((await response.json()) as ObservatorySnapshot);
     } catch {
@@ -64,7 +64,10 @@ class UiStore {
   #openSocket(): void {
     if (this.#stopped || this.#socket) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const socketUrl = new URL(`${protocol}//${window.location.host}/ws`);
+    const token = this.#accessToken();
+    if (token) socketUrl.searchParams.set("token", token);
+    const socket = new WebSocket(socketUrl);
     this.#socket = socket;
     socket.addEventListener("open", () => {
       this.#attempt = 0;
@@ -108,6 +111,23 @@ class UiStore {
   #set(snapshot: ObservatorySnapshot): void {
     this.#snapshot = snapshot;
     for (const listener of this.#listeners) listener();
+  }
+
+  #accessToken(): string | null {
+    const url = new URL(window.location.href);
+    const urlToken = url.searchParams.get("token");
+    if (urlToken) {
+      window.sessionStorage.setItem("observatory.accessToken", urlToken);
+      url.searchParams.delete("token");
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+      return urlToken;
+    }
+    return window.sessionStorage.getItem("observatory.accessToken");
+  }
+
+  #authHeaders(): HeadersInit {
+    const token = this.#accessToken();
+    return token ? { authorization: `Bearer ${token}` } : {};
   }
 }
 

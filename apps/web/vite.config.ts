@@ -10,10 +10,14 @@ export default defineConfig({
     port: webPort,
     strictPort: true,
     proxy: {
-      "/api": `http://127.0.0.1:${serverPort}`,
+      "/api": {
+        target: `http://127.0.0.1:${serverPort}`,
+        changeOrigin: true,
+      },
       "/ws": {
         target: `ws://127.0.0.1:${serverPort}`,
         ws: true,
+        changeOrigin: true,
       },
     },
   },
