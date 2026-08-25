@@ -42,32 +42,39 @@ Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 �
 
 ### bunx로 바로 실행
 
-npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 두 provider CLI가
-없어도 동작하는 Mock Mode이며, 실행 후 브라우저가 자동으로 열립니다.
+npm 패키지를 별도로 설치하지 않고 실행할 수 있습니다. 기본값은 Codex와 Claude를
+모두 선택하는 Real Mode이며, 실행 후 브라우저가 자동으로 열립니다.
 
 ```bash
 bunx agent-observatory
 ```
 
-현재 머신에서 실행 중인 Codex, Claude Code 또는 둘 다 관측하려면 Real Mode를 사용합니다.
+필요하면 Real Mode를 한 provider로 제한할 수 있습니다. 명시적인 `--real` 옵션도
+호환성을 위해 계속 지원하지만 더 이상 필수는 아닙니다.
 
 ```bash
-bunx agent-observatory --real
-bunx agent-observatory --real --provider claude
+bunx agent-observatory --provider codex
+bunx agent-observatory --provider claude
 bunx agent-observatory --real --provider all
 ```
 
-기존 동작과의 호환성을 위해 `--real`은 기본적으로 Codex를 선택합니다. 두 런타임을
-함께 보려면 `--provider all`을 사용합니다.
+provider CLI나 실시간 세션 없이 실행하려면 Mock Mode를 명시합니다.
+
+```bash
+bunx agent-observatory --mock
+bunx agent-observatory --scenario demo
+```
 
 특정 작업 디렉터리만 보거나 브라우저를 자동으로 열지 않을 수도 있습니다.
 
 ```bash
-bunx agent-observatory --real --cwd /absolute/path/to/project
+bunx agent-observatory --cwd /absolute/path/to/project
 bunx agent-observatory --scenario stress --no-open
 ```
 
-기본 주소는 <http://127.0.0.1:4317>입니다. 모든 옵션은
+우선 사용하는 기본 주소는 <http://127.0.0.1:4317>입니다. 해당 포트가 이미 사용
+중이면 CLI가 다음 가용 포트를 선택하고 최종 bootstrap URL을 출력합니다. 사용자가
+`--port`를 명시한 경우에는 조용히 다른 포트로 변경하지 않습니다. 모든 옵션은
 `bunx agent-observatory --help`로 확인할 수 있습니다.
 
 ### 패키지 레지스트리
@@ -253,8 +260,9 @@ bun run dev:real -- --cwd C:\projects\my-app
 - macOS: 시스템 `ps`, `lsof` 명령
 - Windows: CIM을 사용할 수 있는 Windows PowerShell
 
-Mock Mode에는 두 CLI 모두 필요하지 않습니다. Real Mode에는 `--provider`로 선택한
-런타임만 설치되어 있으면 됩니다.
+Mock Mode에는 두 CLI 모두 필요하지 않습니다. 결합 Real Mode는 Codex와 Claude의
+상태를 독립적으로 표시하므로 한 provider를 사용할 수 없어도 다른 provider는 계속
+표시됩니다. 한 런타임만 사용하려면 `--provider`로 제한할 수 있습니다.
 
 ## 개발
 
