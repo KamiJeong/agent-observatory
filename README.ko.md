@@ -23,14 +23,13 @@ Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 �
 ![Codex](https://img.shields.io/badge/Codex-0.149.0-64748b)
 ![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.241-d97757)
 [![npm version](https://img.shields.io/npm/v/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
-[![npm downloads](https://img.shields.io/npm/dm/agent-observatory)](https://www.npmjs.com/package/agent-observatory)
 
 ## 데모
 
 ![Codex와 Claude 에이전트를 한 화면에 표시하는 Agent Observatory](docs/assets/agent-observatory-demo.png)
 
 <details>
-<summary>Provider 필터, 관계 보기, Inspector, Workflow Board 동작 보기</summary>
+<summary>Provider 필터, 관계 보기, Story, Inspector, Workflow Board 동작 보기</summary>
 
 ![Agent Observatory multi-provider 인터랙션 데모](docs/assets/agent-observatory-demo.gif)
 

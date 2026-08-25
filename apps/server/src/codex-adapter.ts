@@ -10,6 +10,7 @@ import type {
 } from "@observatory/core";
 import { normalizeEnvelope, parseEnvelope, toThreadSnapshot, type JsonRpcEnvelope } from "./normalize.ts";
 import { contentCapturePolicy } from "./content-capture.ts";
+import { OBSERVATORY_VERSION } from "./version.ts";
 
 interface PendingCall {
   resolve(value: unknown): void;
@@ -58,7 +59,7 @@ export class RealCodexAdapter implements AgentRuntimeAdapter {
     return {
       adapter: "codex",
       provider: this.provider,
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       codexCliVersion: this.#codexVersion,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: this.#experimental,
@@ -185,7 +186,7 @@ export class RealCodexAdapter implements AgentRuntimeAdapter {
         clientInfo: {
           name: "codex_agent_observatory",
           title: "Codex Agent Observatory",
-          version: "0.1.0",
+          version: OBSERVATORY_VERSION,
         },
         capabilities: {
           experimentalApi: true,

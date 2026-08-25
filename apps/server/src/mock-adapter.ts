@@ -10,6 +10,7 @@ import type {
   RuntimeProvider,
   ThreadSnapshot,
 } from "@observatory/core";
+import { OBSERVATORY_VERSION } from "./version.ts";
 
 type Scenario = "a" | "b" | "demo" | "stress";
 
@@ -123,7 +124,7 @@ export class MockCodexAdapter implements AgentRuntimeAdapter {
     return {
       adapter: "mock",
       provider: this.provider,
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       protocolGenerationVersion: "0.149.0",
       experimentalApi: false,
       discoveryStrategy: "mock",

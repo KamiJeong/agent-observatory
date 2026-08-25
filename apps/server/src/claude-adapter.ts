@@ -31,6 +31,7 @@ import {
   type ClaudeTeamObservation,
 } from "./claude-team-observer.ts";
 import { contentCaptureEnabled } from "./content-capture.ts";
+import { OBSERVATORY_VERSION } from "./version.ts";
 
 const TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -849,7 +850,7 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
     return {
       adapter: "claude",
       provider: "claude",
-      observatoryVersion: "0.1.0",
+      observatoryVersion: OBSERVATORY_VERSION,
       claudeCliVersion: this.#version,
       experimentalApi: false,
       discoveryStrategy: "compatibility",

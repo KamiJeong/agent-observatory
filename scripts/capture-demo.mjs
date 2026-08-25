@@ -50,6 +50,8 @@ async function capture(baseUrl) {
     const screenshotPage = await screenshotContext.newPage();
     await screenshotPage.goto(baseUrl);
     await screenshotPage.getByRole("heading", { name: "Agent Observatory" }).waitFor();
+    await screenshotPage.getByRole("button", { name: /^Status: Working Release Orchestrator/ }).click();
+    await screenshotPage.getByRole("tab", { name: "History", exact: true }).click();
     await screenshotPage.screenshot({
       path: join(assetsDirectory, "agent-observatory-demo.png"),
       animations: "disabled",
@@ -74,13 +76,16 @@ async function capture(baseUrl) {
     await page.getByRole("heading", { name: "Agent Observatory" }).waitFor();
     const video = page.video();
 
-    await page.waitForTimeout(1_200);
+    await page.waitForTimeout(800);
+    await page.getByRole("button", { name: /^Status: Working Release Orchestrator/ }).click();
+    await page.getByRole("tab", { name: "History", exact: true }).click();
+    await page.waitForTimeout(1_600);
     await page.getByRole("button", { name: "Show all 3 secondary relations" }).click();
-    await page.waitForTimeout(1_600);
+    await page.waitForTimeout(1_200);
     await page.getByRole("button", { name: "Claude 3", exact: true }).click();
-    await page.waitForTimeout(1_600);
+    await page.waitForTimeout(1_200);
     await page.getByRole("button", { name: /^Status: Idle Privacy Reviewer/ }).click();
-    await page.waitForTimeout(1_600);
+    await page.waitForTimeout(1_200);
     await page.getByRole("group", { name: "Agent visualization" }).getByRole("button", { name: "Workflows" }).click();
     await page.waitForTimeout(1_800);
 

@@ -11,7 +11,7 @@ const emptySnapshot: ObservatorySnapshot = {
   providerConnections: {},
   runtime: {
     adapter: "mock",
-    observatoryVersion: "0.1.0",
+    observatoryVersion: "unknown",
     experimentalApi: false,
     discoveryStrategy: "mock",
   },
