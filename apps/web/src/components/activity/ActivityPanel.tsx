@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type * as React from "react";
 import type { ActivityKind, AgentActivity, AgentNode, ObservatorySnapshot } from "@observatory/core";
 import { formatDuration, formatTime, shortId, StatusBadge, type TimelineFilter } from "../shared/presentation.tsx";
+import { RunHistory, type RunHistoryMode } from "./RunHistory.tsx";
 
 function filterKinds(filter: TimelineFilter, kind: ActivityKind): boolean {
   if (filter === "all") return true;
@@ -255,16 +256,32 @@ export function RightRail({
   now: number;
 }) {
   const [tab, setTab] = useState<"activity" | "inspector">("activity");
+  const [historyMode, setHistoryMode] = useState<RunHistoryMode | "trace">("story");
   const agent = selectedId ? snapshot.agents[selectedId] : undefined;
   useEffect(() => { if (agent) setTab("inspector"); }, [agent?.id]);
   return (
     <aside className="right-rail panel" aria-label="Activity and agent inspector">
       <div className="rail-tabs" role="tablist">
-        <button role="tab" aria-selected={tab === "activity"} onClick={() => setTab("activity")}>Activity</button>
+        <button role="tab" aria-selected={tab === "activity"} onClick={() => setTab("activity")}>History</button>
         <button role="tab" aria-selected={tab === "inspector"} disabled={!agent} onClick={() => setTab("inspector")}>Inspector</button>
         {agent && <button className="rail-tabs__close" onClick={onClear} aria-label="Close inspector">×</button>}
       </div>
-      {tab === "inspector" && agent ? <Inspector agent={agent} snapshot={snapshot} now={now} /> : <ActivityTimeline snapshot={snapshot} />}
+      {tab === "inspector" && agent
+        ? <Inspector agent={agent} snapshot={snapshot} now={now} />
+        : (
+            <div className="history-panel">
+              <div className="history-view-tabs" role="group" aria-label="History view">
+                {(["story", "messages", "trace"] as const).map((mode) => (
+                  <button key={mode} aria-pressed={historyMode === mode} onClick={() => setHistoryMode(mode)}>
+                    {mode[0]?.toUpperCase()}{mode.slice(1)}
+                  </button>
+                ))}
+              </div>
+              {historyMode === "trace"
+                ? <ActivityTimeline snapshot={snapshot} />
+                : <RunHistory snapshot={snapshot} mode={historyMode} />}
+            </div>
+          )}
     </aside>
   );
 }

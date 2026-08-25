@@ -22,6 +22,18 @@ lifecycle and retry state, then wires the following modules together:
 - `http/public-payload.ts`: removal of private debug payloads at the transport
   boundary.
 
+Adapters emit two complementary streams through `observatory-core`:
+
+- `AgentActivity` retains low-level execution trace such as commands, tools,
+  tests, reads, and writes.
+- `HistoryEvent` retains the human-readable narrative: requests, explicit
+  decisions, work, agent handoffs, deliveries, and completion.
+
+History actors and recipients are first-class fields. Protocol normalizers must
+preserve explicit sender, receiver, and bounded message content rather than
+placing them in opaque metadata. A decision is recorded only from explicit plan
+or commentary evidence; tool execution alone is not treated as a decision.
+
 Add a small endpoint to `api-router.ts`. If an API area gains its own state or
 several endpoints, put it in a dedicated module and let the router delegate to
 it. Authentication and response headers remain shared boundary concerns.
@@ -33,7 +45,7 @@ it. Authentication and response headers remain shared boundary concerns.
 - `dashboard`: page composition and application lifecycle.
 - `agents`: reusable list and interactive graph views.
 - `workflows`: the evidence-based workflow board.
-- `activity`: timeline, recent activity, and inspector views.
+- `activity`: story/messages/trace history, recent activity, and inspector views.
 - `shared`: presentation helpers and small shared UI elements.
 
 Framework-independent graph calculations live in `apps/web/src/lib`. Feature

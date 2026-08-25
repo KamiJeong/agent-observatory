@@ -94,6 +94,120 @@ function itemOutcome(item) {
   if (item.status === "completed") return "completed";
   return void 0;
 }
+var HISTORY_CONTENT_LIMIT = 2e3;
+function boundedText(value) {
+  if (!value) return void 0;
+  const normalized = value.trim();
+  if (!normalized) return void 0;
+  return normalized.length > HISTORY_CONTENT_LIMIT ? `${normalized.slice(0, HISTORY_CONTENT_LIMIT - 1)}\u2026` : normalized;
+}
+function contentText(value) {
+  if (typeof value === "string") return boundedText(value);
+  if (!Array.isArray(value)) return void 0;
+  const parts = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const text = stringValue(entry.text) ?? stringValue(entry.input_text) ?? stringValue(entry.output_text);
+    if (text) parts.push(text);
+    else if (entry.type === "skill" && stringValue(entry.name)) parts.push(`Skill: ${stringValue(entry.name)}`);
+    else if (entry.type === "mention" && stringValue(entry.name)) parts.push(`Mention: ${stringValue(entry.name)}`);
+  }
+  return boundedText(parts.join("\n"));
+}
+function historyStatus(item, completed) {
+  if (item.status === "failed") return "failed";
+  if (item.status === "declined") return "failed";
+  if (!completed || item.status === "inProgress") return "running";
+  return "completed";
+}
+function agentRef(id, label) {
+  return { type: "agent", id, ...label ? { label } : {} };
+}
+function historyFromItem(item, threadId, at, completed, turnId) {
+  const itemId = stringValue(item.id) ?? `${threadId}:${at}`;
+  const base = {
+    id: `activity:${itemId}`,
+    actor: agentRef(threadId),
+    status: historyStatus(item, completed),
+    ...turnId ? { turnId } : {},
+    correlationId: itemId,
+    occurredAt: completed ? at - (numberValue(item.durationMs) ?? 0) : at,
+    source: "protocol"
+  };
+  if (item.type === "userMessage") {
+    return [{
+      ...base,
+      kind: "request",
+      actor: { type: "human" },
+      recipients: [agentRef(threadId)],
+      summary: "Request received",
+      ...contentText(item.content) ? { content: contentText(item.content) } : {},
+      status: "completed"
+    }];
+  }
+  if (item.type === "plan") {
+    return [{
+      ...base,
+      kind: "decision",
+      summary: "Plan updated",
+      ...boundedText(stringValue(item.text)) ? { content: boundedText(stringValue(item.text)) } : {},
+      status: "completed"
+    }];
+  }
+  if (item.type === "agentMessage") {
+    const phase = stringValue(item.phase);
+    return [{
+      ...base,
+      kind: "delivery",
+      recipients: [{ type: "human" }],
+      summary: phase === "final_answer" ? "Delivered final result" : phase === "commentary" ? "Shared progress update" : "Agent message",
+      ...boundedText(stringValue(item.text)) ? { content: boundedText(stringValue(item.text)) } : {},
+      status: phase === "final_answer" || completed ? "completed" : "sent"
+    }];
+  }
+  if (item.type !== "collabAgentToolCall") return [];
+  const senderId = stringValue(item.senderThreadId) ?? threadId;
+  const receivers = stringArray(item.receiverThreadIds) ?? [];
+  const recipients = receivers.map((id) => agentRef(id));
+  const tool = stringValue(item.tool) ?? "collaboration";
+  const details = {
+    spawnAgent: { kind: "handoff", summary: "Delegated work" },
+    sendInput: { kind: "handoff", summary: "Sent message" },
+    resumeAgent: { kind: "handoff", summary: "Resumed agent" },
+    wait: { kind: "work", summary: "Waited for agents" },
+    closeAgent: { kind: "completion", summary: "Closed agent" }
+  };
+  const detail = details[tool] ?? { kind: "handoff", summary: "Agent collaboration" };
+  const events = [{
+    ...base,
+    kind: detail.kind,
+    actor: agentRef(senderId),
+    ...recipients.length > 0 ? { recipients } : {},
+    summary: detail.summary,
+    ...boundedText(stringValue(item.prompt)) ? { content: boundedText(stringValue(item.prompt)) } : {}
+  }];
+  if (isRecord(item.agentsStates)) {
+    for (const [receiverId, state] of Object.entries(item.agentsStates)) {
+      if (!isRecord(state)) continue;
+      const message = boundedText(stringValue(state.message));
+      if (!message) continue;
+      events.push({
+        id: `collab-result:${itemId}:${receiverId}`,
+        kind: "delivery",
+        actor: agentRef(receiverId),
+        recipients: [agentRef(senderId)],
+        summary: state.status === "errored" ? "Reported failure" : "Reported result",
+        content: message,
+        status: state.status === "errored" ? "failed" : "completed",
+        correlationId: itemId,
+        parentEventId: `activity:${itemId}`,
+        occurredAt: at,
+        source: "protocol"
+      });
+    }
+  }
+  return events;
+}
 function activityFromItem(item, threadId, at, completed) {
   const id = stringValue(item.id) ?? `${threadId}:${at}`;
   const base = {
@@ -307,7 +421,14 @@ function normalizeEnvelope(envelope, at = Date.now()) {
         activity,
         ...activity.outcome ? { outcome: activity.outcome } : {}
       } : { type: "activity.started", at, activity };
-      return [activityEvent, ...lifecycleEvents(item, at)];
+      const historyEvents = historyFromItem(
+        item,
+        threadId,
+        at,
+        completed,
+        stringValue(params.turnId)
+      ).map((history) => ({ type: "history.recorded", at, history }));
+      return [activityEvent, ...historyEvents, ...lifecycleEvents(item, at)];
     }
     case "serverRequest/resolved": {
       const requestId = params.requestId;
@@ -658,6 +779,7 @@ import { createServer } from "node:http";
 
 // packages/observatory-core/src/projector.ts
 var DEFAULT_ACTIVITY_LIMIT = 300;
+var DEFAULT_HISTORY_LIMIT = 500;
 var DEFAULT_DEBUG_LIMIT = 150;
 var RECENT_ACTIVITY_LIMIT = 30;
 function projectNativeStatus(status) {
@@ -687,6 +809,7 @@ function createInitialState(runtime, now = Date.now()) {
   return {
     agents: {},
     activities: [],
+    history: [],
     pendingRequests: {},
     connection: { phase: "connecting", attempt: 0 },
     runtime,
@@ -753,7 +876,44 @@ function rebuildChildren(agents) {
   for (const agent of Object.values(next)) agent.children.sort();
   return next;
 }
-function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT, debug: DEFAULT_DEBUG_LIMIT }) {
+function agentActor(id) {
+  return { type: "agent", id };
+}
+function recordHistory(state, history, limit) {
+  return [history, ...state.history.filter((item) => item.id !== history.id)].slice(0, limit);
+}
+function boundedHistoryContent(content) {
+  if (!content) return void 0;
+  return content.length > 2e3 ? `${content.slice(0, 1999)}\u2026` : content;
+}
+function resolveHistoryRecipients(state, history) {
+  if (history.kind !== "delivery" || history.actor.type !== "agent" || !history.actor.id) return history;
+  if (history.recipients?.length !== 1 || history.recipients[0]?.type !== "human") return history;
+  const parentId = state.agents[history.actor.id]?.parentId;
+  return parentId ? { ...history, recipients: [agentActor(parentId)] } : history;
+}
+function activityHistory(activity, status) {
+  if (activity.kind === "approval") return void 0;
+  const content = boundedHistoryContent(activity.detail);
+  return {
+    id: `activity:${activity.id}`,
+    kind: activity.kind === "message" ? "delivery" : "work",
+    actor: agentActor(activity.agentId),
+    ...activity.kind === "message" ? { recipients: [{ type: "human" }] } : {},
+    summary: activity.title,
+    ...content ? { content } : {},
+    status,
+    correlationId: activity.id,
+    occurredAt: activity.startedAt,
+    source: "derived"
+  };
+}
+function reduceEvent(state, event, limits = {
+  activities: DEFAULT_ACTIVITY_LIMIT,
+  debug: DEFAULT_DEBUG_LIMIT,
+  history: DEFAULT_HISTORY_LIMIT
+}) {
+  const historyLimit = limits.history ?? DEFAULT_HISTORY_LIMIT;
   let next = {
     ...state,
     agents: { ...state.agents },
@@ -779,6 +939,20 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
         next.agents[event.thread.id] = discovered;
       }
       next.agents = rebuildChildren(next.agents);
+      if (event.thread.parentThreadId) {
+        next.history = recordHistory(state, {
+          id: `spawn:${event.thread.id}`,
+          kind: "handoff",
+          actor: agentActor(event.thread.parentThreadId),
+          recipients: [{ type: "agent", id: event.thread.id, label: event.thread.nickname }],
+          summary: `Started ${event.thread.nickname ?? event.thread.role ?? "subagent"}`,
+          ...event.thread.role ? { content: event.thread.role } : {},
+          status: "started",
+          correlationId: event.thread.id,
+          occurredAt: event.at,
+          source: "derived"
+        }, historyLimit);
+      }
       break;
     }
     case "thread.status": {
@@ -824,6 +998,19 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
         Object.assign(mapped, { status: "idle", waitingReasons: [] });
       }
       next.agents[event.threadId] = { ...previous, ...mapped };
+      if (["completed", "errored", "interrupted"].includes(event.status)) {
+        const failed = event.status === "errored";
+        next.history = recordHistory(state, {
+          id: `lifecycle:${event.threadId}:${event.status}:${event.at}`,
+          kind: "completion",
+          actor: agentActor(event.threadId),
+          summary: failed ? "Agent failed" : event.status === "interrupted" ? "Agent interrupted" : "Agent completed work",
+          ...event.message ? { content: event.message } : {},
+          status: failed ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
+          occurredAt: event.at,
+          source: "derived"
+        }, historyLimit);
+      }
       break;
     }
     case "turn.started": {
@@ -837,6 +1024,17 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
         completedAt: void 0,
         updatedAt: event.at
       };
+      next.history = recordHistory(state, {
+        id: `turn:${event.turnId}`,
+        kind: "work",
+        actor: agentActor(event.threadId),
+        summary: "Started work",
+        status: "running",
+        turnId: event.turnId,
+        correlationId: event.turnId,
+        occurredAt: event.at,
+        source: "derived"
+      }, historyLimit);
       break;
     }
     case "turn.completed": {
@@ -851,6 +1049,19 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
         currentActivityId: void 0,
         updatedAt: event.at
       };
+      next.history = recordHistory(state, {
+        id: `turn-completed:${event.turnId}`,
+        kind: "completion",
+        actor: agentActor(event.threadId),
+        summary: event.status === "failed" ? "Work failed" : event.status === "interrupted" ? "Work interrupted" : "Work completed",
+        ...event.error ? { content: event.error } : {},
+        status: event.status === "failed" ? "failed" : event.status === "interrupted" ? "interrupted" : "completed",
+        turnId: event.turnId,
+        correlationId: event.turnId,
+        parentEventId: `turn:${event.turnId}`,
+        occurredAt: event.at,
+        source: "derived"
+      }, historyLimit);
       break;
     }
     case "activity.started": {
@@ -868,6 +1079,8 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
         ].slice(0, RECENT_ACTIVITY_LIMIT),
         updatedAt: event.at
       };
+      const startedHistory = activityHistory(event.activity, "running");
+      if (startedHistory) next.history = recordHistory(state, startedHistory, historyLimit);
       break;
     }
     case "activity.completed": {
@@ -880,8 +1093,16 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
         ...previous.currentActivityId === event.activityId ? { currentActivityId: void 0 } : {},
         updatedAt: event.at
       };
+      if (completed) {
+        const status = completed.outcome === "failed" || completed.outcome === "declined" ? "failed" : completed.outcome === "interrupted" ? "interrupted" : "completed";
+        const completedHistory = activityHistory(completed, status);
+        if (completedHistory) next.history = recordHistory(state, completedHistory, historyLimit);
+      }
       break;
     }
+    case "history.recorded":
+      next.history = recordHistory(state, resolveHistoryRecipients(state, event.history), historyLimit);
+      break;
     case "request.opened": {
       next.pendingRequests[event.request.id] = event.request;
       const previous = ensureAgent(state, event.request.agentId, event.at);
@@ -892,6 +1113,18 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
         waitingReasons: reasons,
         updatedAt: event.at
       };
+      next.history = recordHistory(state, {
+        id: `request:${event.request.id}`,
+        kind: "request",
+        actor: agentActor(event.request.agentId),
+        recipients: [{ type: "human" }],
+        summary: event.request.title,
+        ...event.request.detail ? { content: event.request.detail } : {},
+        status: "running",
+        correlationId: event.request.id,
+        occurredAt: event.request.openedAt,
+        source: "derived"
+      }, historyLimit);
       break;
     }
     case "request.resolved": {
@@ -907,6 +1140,20 @@ function reduceEvent(state, event, limits = { activities: DEFAULT_ACTIVITY_LIMIT
           waitingReasons: remaining,
           updatedAt: event.at
         };
+      }
+      if (request) {
+        next.history = recordHistory(state, {
+          id: `request:${event.requestId}`,
+          kind: "request",
+          actor: agentActor(request.agentId),
+          recipients: [{ type: "human" }],
+          summary: request.title,
+          ...request.detail ? { content: request.detail } : {},
+          status: "completed",
+          correlationId: request.id,
+          occurredAt: request.openedAt,
+          source: "derived"
+        }, historyLimit);
       }
       break;
     }
@@ -1311,7 +1558,31 @@ var MockCodexAdapter = class {
       at: Date.now(),
       connection: { phase: "connected", attempt: 0, message: `Mock scenario ${this.#scenario.toUpperCase()}` }
     });
-    if (this.#scenario === "a") this.#runScenarioA();
+    if (this.#scenario === "a") {
+      const now = Date.now();
+      this.#history({
+        id: "mock-request",
+        kind: "request",
+        actor: { type: "human" },
+        recipients: [{ type: "agent", id: "mock-main" }],
+        summary: "Request received",
+        content: "Inspect the Codex agent run and report verified results.",
+        status: "completed",
+        occurredAt: now,
+        source: "mock"
+      });
+      this.#history({
+        id: "mock-decision",
+        kind: "decision",
+        actor: { type: "agent", id: "mock-main" },
+        summary: "Plan updated",
+        content: "Research the protocol, implement the projector, then verify it in the browser.",
+        status: "completed",
+        occurredAt: now + 1,
+        source: "mock"
+      });
+      this.#runScenarioA();
+    }
     if (this.#scenario === "b") this.#runScenarioB();
     if (this.#scenario === "stress") this.#runStress();
   }
@@ -1373,9 +1644,23 @@ var MockCodexAdapter = class {
       activity: { id, agentId, kind, title, ...detail ? { detail } : {}, startedAt: now }
     });
   }
+  #history(history) {
+    this.#emit({ type: "history.recorded", at: history.occurredAt, history });
+  }
   #runScenarioA() {
     this.#schedule(500, () => {
       this.#discover(baseThread("mock-researcher", "Researcher", "research", active(), "mock-main", 1));
+      this.#history({
+        id: "mock-research-handoff",
+        kind: "handoff",
+        actor: { type: "agent", id: "mock-main" },
+        recipients: [{ type: "agent", id: "mock-researcher" }],
+        summary: "Delegated work",
+        content: "Identify the protocol events needed for agent status projection.",
+        status: "sent",
+        occurredAt: Date.now(),
+        source: "mock"
+      });
       this.#activity("mock-researcher", "research-web", "tool", "Searching Codex protocol", "thread/status/changed");
     });
     this.#schedule(1100, () => {
@@ -1390,6 +1675,17 @@ var MockCodexAdapter = class {
         threadId: "mock-researcher",
         activityId: "research-web",
         outcome: "completed"
+      });
+      this.#history({
+        id: "mock-research-delivery",
+        kind: "delivery",
+        actor: { type: "agent", id: "mock-researcher" },
+        recipients: [{ type: "agent", id: "mock-main" }],
+        summary: "Reported result",
+        content: "Confirmed thread/status/changed as the primary native status signal.",
+        status: "completed",
+        occurredAt: Date.now(),
+        source: "mock"
       });
     });
     this.#schedule(3800, () => {
@@ -1417,6 +1713,17 @@ var MockCodexAdapter = class {
     this.#schedule(10500, () => {
       this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-tester", status: "completed" });
       this.#emit({ type: "agent.lifecycle", at: Date.now(), threadId: "mock-implementer", status: "completed" });
+      this.#history({
+        id: "mock-final-delivery",
+        kind: "delivery",
+        actor: { type: "agent", id: "mock-main" },
+        recipients: [{ type: "human" }],
+        summary: "Delivered final result",
+        content: "Implementation and browser verification completed.",
+        status: "completed",
+        occurredAt: Date.now(),
+        source: "mock"
+      });
     });
   }
   #seedScenarioB() {
@@ -1759,11 +2066,13 @@ function selectRootThreadIds(roots, discovery, configuredCwd, rootOverride, plat
 
 // apps/server/src/shared-state-adapter.ts
 var ACTIVITY_LIMIT_PER_THREAD = 30;
+var HISTORY_LIMIT_PER_THREAD = 80;
 var GLOBAL_ACTIVITY_LIMIT = 300;
 var SAFETY_REFRESH_MS = 15e3;
 var PROCESS_DISCOVERY_CACHE_MS = 2e3;
 var ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024;
 var SEEN_ACTIVITY_LIMIT = 3e3;
+var SEEN_HISTORY_LIMIT = 5e3;
 function numberValue2(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "bigint") return Number(value);
@@ -1806,6 +2115,56 @@ function activityTitle(name) {
     default:
       return { kind: "tool", title: name.replaceAll("_", " ") || "Tool call" };
   }
+}
+function boundedHistoryText(value) {
+  if (typeof value !== "string") return void 0;
+  const normalized = value.trim();
+  if (!normalized) return void 0;
+  return normalized.length > 2e3 ? `${normalized.slice(0, 1999)}\u2026` : normalized;
+}
+function rolloutMessageText(payload) {
+  const direct = boundedHistoryText(payload.text);
+  if (direct) return direct;
+  if (!Array.isArray(payload.content)) return void 0;
+  const parts = payload.content.map((entry) => recordValue(entry)).map((entry) => boundedHistoryText(entry?.text ?? entry?.input_text ?? entry?.output_text)).filter((entry) => Boolean(entry));
+  return boundedHistoryText(parts.join("\n"));
+}
+function collaborationHistory(name, input, callId, threadId, at) {
+  if (!["spawn_agent", "send_message", "followup_task"].includes(name)) return void 0;
+  const parsed = jsonRecord(input) ?? {};
+  const target = boundedHistoryText(parsed.target);
+  const taskName = boundedHistoryText(parsed.task_name);
+  const content = boundedHistoryText(parsed.message) ?? boundedHistoryText(parsed.task);
+  const recipient = target ? { type: "agent", id: target, ...target.includes("/") ? { label: target } : {} } : taskName ? { type: "agent", label: taskName } : void 0;
+  return {
+    id: `activity:${callId}`,
+    kind: "handoff",
+    actor: { type: "agent", id: threadId },
+    ...recipient ? { recipients: [recipient] } : {},
+    summary: name === "spawn_agent" ? "Delegated work" : name === "followup_task" ? "Assigned follow-up" : "Sent message",
+    ...content ? { content } : {},
+    status: "sent",
+    correlationId: callId,
+    occurredAt: at,
+    source: "compatibility"
+  };
+}
+function decisionHistory(name, input, callId, threadId, at) {
+  if (!["update_plan", "create_goal"].includes(name)) return void 0;
+  const parsed = jsonRecord(input) ?? {};
+  const plan = Array.isArray(parsed.plan) ? parsed.plan.map((item) => recordValue(item)).map((item) => boundedHistoryText(item?.step)).filter((item) => Boolean(item)).map((step, index) => `${index + 1}. ${step}`).join("\n") : void 0;
+  const content = boundedHistoryText(parsed.explanation) ?? boundedHistoryText(parsed.objective) ?? boundedHistoryText(plan);
+  return {
+    id: `activity:${callId}`,
+    kind: "decision",
+    actor: { type: "agent", id: threadId },
+    summary: name === "create_goal" ? "Goal set" : "Plan updated",
+    ...content ? { content } : {},
+    status: "started",
+    correlationId: callId,
+    occurredAt: at,
+    source: "compatibility"
+  };
 }
 function skillNameFromPath(path2) {
   const parts = path2.split("/").filter(Boolean);
@@ -1865,6 +2224,8 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
   const observedWorkflows = /* @__PURE__ */ new Set();
   const openCalls = /* @__PURE__ */ new Map();
   const completedActivities = [];
+  const openHistory = /* @__PURE__ */ new Map();
+  const completedHistory = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     const envelope = jsonRecord(line);
@@ -1882,8 +2243,31 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
       continue;
     }
     if (envelope.type === "event_msg") {
-      if (payload.type === "task_started" && at !== void 0) taskStartedAt = at;
-      if (payload.type === "task_complete" && at !== void 0) taskCompletedAt = at;
+      if (payload.type === "task_started" && at !== void 0) {
+        taskStartedAt = at;
+        openHistory.set(`compat-turn:${threadId}`, {
+          id: `compat-turn:${threadId}`,
+          kind: "work",
+          actor: { type: "agent", id: threadId },
+          summary: "Started work",
+          status: "running",
+          occurredAt: at,
+          source: "compatibility"
+        });
+      }
+      if (payload.type === "task_complete" && at !== void 0) {
+        taskCompletedAt = at;
+        openHistory.delete(`compat-turn:${threadId}`);
+        completedHistory.push({
+          id: `compat-completion:${threadId}:${at}`,
+          kind: "completion",
+          actor: { type: "agent", id: threadId },
+          summary: "Work completed",
+          status: "completed",
+          occurredAt: at,
+          source: "compatibility"
+        });
+      }
       if (payload.type === "turn_aborted" && at !== void 0) interruptedAt = at;
       continue;
     }
@@ -1906,6 +2290,8 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
         detail: name,
         startedAt: at
       });
+      const semanticHistory = collaborationHistory(name, input, callId, threadId, at) ?? decisionHistory(name, input, callId, threadId, at);
+      if (semanticHistory) openHistory.set(callId, semanticHistory);
       continue;
     }
     if (itemType === "custom_tool_call_output" || itemType === "function_call_output") {
@@ -1915,17 +2301,46 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
         completedActivities.push({ ...activity, completedAt: at, outcome: "completed" });
         openCalls.delete(activity.id);
       }
+      const history2 = callId ? openHistory.get(callId) : void 0;
+      if (history2) {
+        completedHistory.push({ ...history2, status: "completed" });
+        openHistory.delete(history2.correlationId ?? history2.id);
+      }
       continue;
     }
     if (itemType === "message") {
+      const content = rolloutMessageText(payload);
+      const role = typeof payload.role === "string" ? payload.role : "assistant";
       completedActivities.push({
         id: `message:${threadId}:${at}`,
         agentId: threadId,
         kind: "message",
-        title: "Agent message",
+        title: role === "user" ? "User message" : "Agent message",
+        ...content ? { detail: content } : {},
         startedAt: at,
         completedAt: at,
         outcome: "completed"
+      });
+      completedHistory.push(role === "user" ? {
+        id: `activity:message:${threadId}:${at}`,
+        kind: "request",
+        actor: { type: "human" },
+        recipients: [{ type: "agent", id: threadId }],
+        summary: "Request received",
+        ...content ? { content } : {},
+        status: "completed",
+        occurredAt: at,
+        source: "compatibility"
+      } : {
+        id: `activity:message:${threadId}:${at}`,
+        kind: "delivery",
+        actor: { type: "agent", id: threadId },
+        recipients: [{ type: "human" }],
+        summary: payload.phase === "final_answer" ? "Delivered final result" : "Agent message",
+        ...content ? { content } : {},
+        status: "completed",
+        occurredAt: at,
+        source: "compatibility"
       });
     }
   }
@@ -1952,6 +2367,7 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
     nativeStatus = processActive && isRoot ? { type: "idle" } : { type: "notLoaded" };
   }
   const activities = [...completedActivities, ...openCalls.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-ACTIVITY_LIMIT_PER_THREAD);
+  const history = [...completedHistory, ...openHistory.values()].sort((a, b) => a.occurredAt - b.occurredAt).slice(-HISTORY_LIMIT_PER_THREAD);
   return {
     nativeStatus,
     ...lifecycle ? { lifecycle } : {},
@@ -1961,6 +2377,7 @@ function parseRolloutState(text, threadId, isRoot, processActive) {
     observedSkills: [...observedSkills].sort(),
     observedWorkflows: [...observedWorkflows].sort(),
     ...collaborationMode ? { collaborationMode } : {},
+    history,
     activities
   };
 }
@@ -2026,6 +2443,8 @@ var SharedStateCodexAdapter = class {
   #codexVersion = "unknown";
   #seenActivities = /* @__PURE__ */ new Set();
   #seenActivityOrder = [];
+  #seenHistory = /* @__PURE__ */ new Set();
+  #seenHistoryOrder = [];
   #lastLifecycle = /* @__PURE__ */ new Map();
   #lastThreadFingerprint = /* @__PURE__ */ new Map();
   #rolloutCache = /* @__PURE__ */ new Map();
@@ -2240,6 +2659,8 @@ var SharedStateCodexAdapter = class {
       for (const thread of next.values()) this.#projectThread(thread);
       const activities = [...next.values()].flatMap((thread) => thread.rollout.activities).sort((a, b) => a.startedAt - b.startedAt).slice(-GLOBAL_ACTIVITY_LIMIT);
       for (const activity of activities) this.#projectActivity(activity);
+      const history = [...next.values()].flatMap((thread) => thread.rollout.history).sort((a, b) => a.occurredAt - b.occurredAt);
+      for (const item of history) this.#projectHistory(item);
     } finally {
       this.#refreshing = false;
       if (this.#refreshQueued) {
@@ -2289,6 +2710,17 @@ var SharedStateCodexAdapter = class {
     } else {
       this.#emit({ type: "activity.started", at: activity.startedAt, activity });
     }
+  }
+  #projectHistory(history) {
+    const key = `${history.id}:${history.status ?? "recorded"}`;
+    if (this.#seenHistory.has(key)) return;
+    this.#seenHistory.add(key);
+    this.#seenHistoryOrder.push(key);
+    while (this.#seenHistoryOrder.length > SEEN_HISTORY_LIMIT) {
+      const oldest = this.#seenHistoryOrder.shift();
+      if (oldest) this.#seenHistory.delete(oldest);
+    }
+    this.#emit({ type: "history.recorded", at: history.occurredAt, history });
   }
   #rememberActivity(key) {
     this.#seenActivities.add(key);

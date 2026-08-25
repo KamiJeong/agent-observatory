@@ -2,6 +2,8 @@ import type {
   AgentActivity,
   AgentLifecycleStatus,
   CodexRuntimeEvent,
+  HistoryActor,
+  HistoryEvent,
   NativeThreadStatus,
   PendingRequest,
   ThreadSnapshot,
@@ -103,6 +105,136 @@ function itemOutcome(item: UnknownRecord): AgentActivity["outcome"] | undefined 
   if (item.status === "declined") return "declined";
   if (item.status === "completed") return "completed";
   return undefined;
+}
+
+const HISTORY_CONTENT_LIMIT = 2_000;
+
+function boundedText(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  return normalized.length > HISTORY_CONTENT_LIMIT
+    ? `${normalized.slice(0, HISTORY_CONTENT_LIMIT - 1)}…`
+    : normalized;
+}
+
+function contentText(value: unknown): string | undefined {
+  if (typeof value === "string") return boundedText(value);
+  if (!Array.isArray(value)) return undefined;
+  const parts: string[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const text = stringValue(entry.text) ?? stringValue(entry.input_text) ?? stringValue(entry.output_text);
+    if (text) parts.push(text);
+    else if (entry.type === "skill" && stringValue(entry.name)) parts.push(`Skill: ${stringValue(entry.name)}`);
+    else if (entry.type === "mention" && stringValue(entry.name)) parts.push(`Mention: ${stringValue(entry.name)}`);
+  }
+  return boundedText(parts.join("\n"));
+}
+
+function historyStatus(item: UnknownRecord, completed: boolean): HistoryEvent["status"] {
+  if (item.status === "failed") return "failed";
+  if (item.status === "declined") return "failed";
+  if (!completed || item.status === "inProgress") return "running";
+  return "completed";
+}
+
+function agentRef(id: string, label?: string): HistoryActor {
+  return { type: "agent", id, ...(label ? { label } : {}) };
+}
+
+function historyFromItem(
+  item: UnknownRecord,
+  threadId: string,
+  at: number,
+  completed: boolean,
+  turnId?: string,
+): HistoryEvent[] {
+  const itemId = stringValue(item.id) ?? `${threadId}:${at}`;
+  const base = {
+    id: `activity:${itemId}`,
+    actor: agentRef(threadId),
+    status: historyStatus(item, completed),
+    ...(turnId ? { turnId } : {}),
+    correlationId: itemId,
+    occurredAt: completed ? at - (numberValue(item.durationMs) ?? 0) : at,
+    source: "protocol" as const,
+  };
+
+  if (item.type === "userMessage") {
+    return [{
+      ...base,
+      kind: "request",
+      actor: { type: "human" },
+      recipients: [agentRef(threadId)],
+      summary: "Request received",
+      ...(contentText(item.content) ? { content: contentText(item.content) } : {}),
+      status: "completed",
+    }];
+  }
+  if (item.type === "plan") {
+    return [{
+      ...base,
+      kind: "decision",
+      summary: "Plan updated",
+      ...(boundedText(stringValue(item.text)) ? { content: boundedText(stringValue(item.text)) } : {}),
+      status: "completed",
+    }];
+  }
+  if (item.type === "agentMessage") {
+    const phase = stringValue(item.phase);
+    return [{
+      ...base,
+      kind: "delivery",
+      recipients: [{ type: "human" }],
+      summary: phase === "final_answer" ? "Delivered final result" : phase === "commentary" ? "Shared progress update" : "Agent message",
+      ...(boundedText(stringValue(item.text)) ? { content: boundedText(stringValue(item.text)) } : {}),
+      status: phase === "final_answer" || completed ? "completed" : "sent",
+    }];
+  }
+  if (item.type !== "collabAgentToolCall") return [];
+
+  const senderId = stringValue(item.senderThreadId) ?? threadId;
+  const receivers = stringArray(item.receiverThreadIds) ?? [];
+  const recipients = receivers.map((id) => agentRef(id));
+  const tool = stringValue(item.tool) ?? "collaboration";
+  const details: Record<string, { kind: HistoryEvent["kind"]; summary: string }> = {
+    spawnAgent: { kind: "handoff", summary: "Delegated work" },
+    sendInput: { kind: "handoff", summary: "Sent message" },
+    resumeAgent: { kind: "handoff", summary: "Resumed agent" },
+    wait: { kind: "work", summary: "Waited for agents" },
+    closeAgent: { kind: "completion", summary: "Closed agent" },
+  };
+  const detail = details[tool] ?? { kind: "handoff" as const, summary: "Agent collaboration" };
+  const events: HistoryEvent[] = [{
+    ...base,
+    kind: detail.kind,
+    actor: agentRef(senderId),
+    ...(recipients.length > 0 ? { recipients } : {}),
+    summary: detail.summary,
+    ...(boundedText(stringValue(item.prompt)) ? { content: boundedText(stringValue(item.prompt)) } : {}),
+  }];
+  if (isRecord(item.agentsStates)) {
+    for (const [receiverId, state] of Object.entries(item.agentsStates)) {
+      if (!isRecord(state)) continue;
+      const message = boundedText(stringValue(state.message));
+      if (!message) continue;
+      events.push({
+        id: `collab-result:${itemId}:${receiverId}`,
+        kind: "delivery",
+        actor: agentRef(receiverId),
+        recipients: [agentRef(senderId)],
+        summary: state.status === "errored" ? "Reported failure" : "Reported result",
+        content: message,
+        status: state.status === "errored" ? "failed" : "completed",
+        correlationId: itemId,
+        parentEventId: `activity:${itemId}`,
+        occurredAt: at,
+        source: "protocol",
+      });
+    }
+  }
+  return events;
 }
 
 function activityFromItem(
@@ -344,7 +476,15 @@ export function normalizeEnvelope(envelope: JsonRpcEnvelope, at = Date.now()): C
             ...(activity.outcome ? { outcome: activity.outcome } : {}),
           }
         : { type: "activity.started", at, activity };
-      return [activityEvent, ...lifecycleEvents(item, at)];
+      const historyEvents: CodexRuntimeEvent[] = historyFromItem(
+        item,
+        threadId,
+        at,
+        completed,
+        stringValue(params.turnId),
+      )
+        .map((history) => ({ type: "history.recorded", at, history }));
+      return [activityEvent, ...historyEvents, ...lifecycleEvents(item, at)];
     }
     case "serverRequest/resolved": {
       const requestId = params.requestId;

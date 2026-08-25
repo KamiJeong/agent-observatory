@@ -87,6 +87,68 @@ describe("shared Codex state compatibility", () => {
     expect(unknown.lifecycle).toBeUndefined();
   });
 
+  it("preserves compatibility-mode requests and agent-to-agent messages", () => {
+    const state = parseRolloutState([
+      line("2026-08-24T01:00:00.000Z", "response_item", {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Review authentication" }],
+      }),
+      line("2026-08-24T01:00:01.000Z", "response_item", {
+        type: "custom_tool_call",
+        name: "send_message",
+        call_id: "message-1",
+        input: JSON.stringify({ target: "reviewer", message: "Check the cookie boundary" }),
+      }),
+      line("2026-08-24T01:00:02.000Z", "response_item", {
+        type: "custom_tool_call_output",
+        call_id: "message-1",
+      }),
+      line("2026-08-24T01:00:02.100Z", "response_item", {
+        type: "custom_tool_call",
+        name: "update_plan",
+        call_id: "plan-1",
+        input: JSON.stringify({ plan: [{ step: "Inspect" }, { step: "Verify" }] }),
+      }),
+      line("2026-08-24T01:00:02.200Z", "response_item", {
+        type: "custom_tool_call_output",
+        call_id: "plan-1",
+      }),
+      line("2026-08-24T01:00:03.000Z", "response_item", {
+        type: "message",
+        role: "assistant",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: "Review complete" }],
+      }),
+    ].join("\n"), "root-1", true, true);
+
+    expect(state.history).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "request",
+        actor: { type: "human" },
+        content: "Review authentication",
+      }),
+      expect.objectContaining({
+        kind: "handoff",
+        actor: { type: "agent", id: "root-1" },
+        recipients: [{ type: "agent", id: "reviewer" }],
+        content: "Check the cookie boundary",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        kind: "delivery",
+        summary: "Delivered final result",
+        content: "Review complete",
+      }),
+      expect.objectContaining({
+        kind: "decision",
+        summary: "Plan updated",
+        content: "1. Inspect\n2. Verify",
+        status: "completed",
+      }),
+    ]));
+  });
+
   it("keeps a completed interactive root ready for another turn", () => {
     const state = parseRolloutState(
       [

@@ -41,6 +41,34 @@ export interface AgentActivity {
   metadata?: Record<string, unknown>;
 }
 
+export type HistoryActor =
+  | { type: "human"; label?: string }
+  | { type: "agent"; id?: string; label?: string }
+  | { type: "system"; label?: string };
+
+export type HistoryEventKind =
+  | "request"
+  | "decision"
+  | "work"
+  | "handoff"
+  | "delivery"
+  | "completion";
+
+export interface HistoryEvent {
+  id: string;
+  kind: HistoryEventKind;
+  actor: HistoryActor;
+  recipients?: HistoryActor[];
+  summary: string;
+  content?: string;
+  status?: "started" | "running" | "sent" | "completed" | "failed" | "interrupted";
+  turnId?: string;
+  correlationId?: string;
+  parentEventId?: string;
+  occurredAt: number;
+  source: "protocol" | "compatibility" | "derived" | "mock";
+}
+
 export interface TokenUsageSnapshot {
   inputTokens?: number;
   cachedInputTokens?: number;
@@ -154,6 +182,7 @@ export interface DebugEntry {
 export interface ObservatoryState {
   agents: Record<string, AgentNode>;
   activities: AgentActivity[];
+  history: HistoryEvent[];
   pendingRequests: Record<string, PendingRequest>;
   selectedAgentId?: string;
   connection: ConnectionState;
@@ -210,6 +239,7 @@ export type CodexRuntimeEvent =
       activity?: AgentActivity;
       outcome?: AgentActivity["outcome"];
     }
+  | { type: "history.recorded"; at: number; history: HistoryEvent }
   | { type: "request.opened"; at: number; request: PendingRequest }
   | {
       type: "request.resolved";

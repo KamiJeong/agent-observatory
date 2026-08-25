@@ -19,6 +19,7 @@ import type {
   CodexAdapter,
   CodexRuntimeEvent,
   DiscoveryOptions,
+  HistoryEvent,
   NativeThreadStatus,
   ReadThreadOptions,
   RuntimeInfo,
@@ -46,6 +47,7 @@ interface RolloutState {
   observedWorkflows: string[];
   collaborationMode?: string;
   activities: AgentActivity[];
+  history: HistoryEvent[];
 }
 
 interface SharedThread {
@@ -55,11 +57,13 @@ interface SharedThread {
 }
 
 const ACTIVITY_LIMIT_PER_THREAD = 30;
+const HISTORY_LIMIT_PER_THREAD = 80;
 const GLOBAL_ACTIVITY_LIMIT = 300;
 const SAFETY_REFRESH_MS = 15_000;
 const PROCESS_DISCOVERY_CACHE_MS = 2_000;
 const ROLLOUT_TAIL_BYTES = 2 * 1024 * 1024;
 const SEEN_ACTIVITY_LIMIT = 3_000;
+const SEEN_HISTORY_LIMIT = 5_000;
 
 function numberValue(value: SqlValue | undefined): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -112,6 +116,88 @@ function activityTitle(name: string): { kind: AgentActivity["kind"]; title: stri
     default:
       return { kind: "tool", title: name.replaceAll("_", " ") || "Tool call" };
   }
+}
+
+function boundedHistoryText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  return normalized.length > 2_000 ? `${normalized.slice(0, 1_999)}…` : normalized;
+}
+
+function rolloutMessageText(payload: Record<string, unknown>): string | undefined {
+  const direct = boundedHistoryText(payload.text);
+  if (direct) return direct;
+  if (!Array.isArray(payload.content)) return undefined;
+  const parts = payload.content
+    .map((entry) => recordValue(entry))
+    .map((entry) => boundedHistoryText(entry?.text ?? entry?.input_text ?? entry?.output_text))
+    .filter((entry): entry is string => Boolean(entry));
+  return boundedHistoryText(parts.join("\n"));
+}
+
+function collaborationHistory(
+  name: string,
+  input: string,
+  callId: string,
+  threadId: string,
+  at: number,
+): HistoryEvent | undefined {
+  if (!["spawn_agent", "send_message", "followup_task"].includes(name)) return undefined;
+  const parsed = jsonRecord(input) ?? {};
+  const target = boundedHistoryText(parsed.target);
+  const taskName = boundedHistoryText(parsed.task_name);
+  const content = boundedHistoryText(parsed.message) ?? boundedHistoryText(parsed.task);
+  const recipient = target
+    ? { type: "agent" as const, id: target, ...(target.includes("/") ? { label: target } : {}) }
+    : taskName
+      ? { type: "agent" as const, label: taskName }
+      : undefined;
+  return {
+    id: `activity:${callId}`,
+    kind: "handoff",
+    actor: { type: "agent", id: threadId },
+    ...(recipient ? { recipients: [recipient] } : {}),
+    summary: name === "spawn_agent" ? "Delegated work" : name === "followup_task" ? "Assigned follow-up" : "Sent message",
+    ...(content ? { content } : {}),
+    status: "sent",
+    correlationId: callId,
+    occurredAt: at,
+    source: "compatibility",
+  };
+}
+
+function decisionHistory(
+  name: string,
+  input: string,
+  callId: string,
+  threadId: string,
+  at: number,
+): HistoryEvent | undefined {
+  if (!["update_plan", "create_goal"].includes(name)) return undefined;
+  const parsed = jsonRecord(input) ?? {};
+  const plan = Array.isArray(parsed.plan)
+    ? parsed.plan
+        .map((item) => recordValue(item))
+        .map((item) => boundedHistoryText(item?.step))
+        .filter((item): item is string => Boolean(item))
+        .map((step, index) => `${index + 1}. ${step}`)
+        .join("\n")
+    : undefined;
+  const content = boundedHistoryText(parsed.explanation)
+    ?? boundedHistoryText(parsed.objective)
+    ?? boundedHistoryText(plan);
+  return {
+    id: `activity:${callId}`,
+    kind: "decision",
+    actor: { type: "agent", id: threadId },
+    summary: name === "create_goal" ? "Goal set" : "Plan updated",
+    ...(content ? { content } : {}),
+    status: "started",
+    correlationId: callId,
+    occurredAt: at,
+    source: "compatibility",
+  };
 }
 
 function skillNameFromPath(path: string): string | undefined {
@@ -186,6 +272,8 @@ export function parseRolloutState(
   const observedWorkflows = new Set<string>();
   const openCalls = new Map<string, AgentActivity>();
   const completedActivities: AgentActivity[] = [];
+  const openHistory = new Map<string, HistoryEvent>();
+  const completedHistory: HistoryEvent[] = [];
 
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -206,8 +294,31 @@ export function parseRolloutState(
     }
 
     if (envelope.type === "event_msg") {
-      if (payload.type === "task_started" && at !== undefined) taskStartedAt = at;
-      if (payload.type === "task_complete" && at !== undefined) taskCompletedAt = at;
+      if (payload.type === "task_started" && at !== undefined) {
+        taskStartedAt = at;
+        openHistory.set(`compat-turn:${threadId}`, {
+          id: `compat-turn:${threadId}`,
+          kind: "work",
+          actor: { type: "agent", id: threadId },
+          summary: "Started work",
+          status: "running",
+          occurredAt: at,
+          source: "compatibility",
+        });
+      }
+      if (payload.type === "task_complete" && at !== undefined) {
+        taskCompletedAt = at;
+        openHistory.delete(`compat-turn:${threadId}`);
+        completedHistory.push({
+          id: `compat-completion:${threadId}:${at}`,
+          kind: "completion",
+          actor: { type: "agent", id: threadId },
+          summary: "Work completed",
+          status: "completed",
+          occurredAt: at,
+          source: "compatibility",
+        });
+      }
       if (payload.type === "turn_aborted" && at !== undefined) interruptedAt = at;
       continue;
     }
@@ -235,6 +346,9 @@ export function parseRolloutState(
         detail: name,
         startedAt: at,
       });
+      const semanticHistory = collaborationHistory(name, input, callId, threadId, at)
+        ?? decisionHistory(name, input, callId, threadId, at);
+      if (semanticHistory) openHistory.set(callId, semanticHistory);
       continue;
     }
 
@@ -245,19 +359,50 @@ export function parseRolloutState(
         completedActivities.push({ ...activity, completedAt: at, outcome: "completed" });
         openCalls.delete(activity.id);
       }
+      const history = callId ? openHistory.get(callId) : undefined;
+      if (history) {
+        completedHistory.push({ ...history, status: "completed" });
+        openHistory.delete(history.correlationId ?? history.id);
+      }
       continue;
     }
 
     if (itemType === "message") {
+      const content = rolloutMessageText(payload);
+      const role = typeof payload.role === "string" ? payload.role : "assistant";
       completedActivities.push({
         id: `message:${threadId}:${at}`,
         agentId: threadId,
         kind: "message",
-        title: "Agent message",
+        title: role === "user" ? "User message" : "Agent message",
+        ...(content ? { detail: content } : {}),
         startedAt: at,
         completedAt: at,
         outcome: "completed",
       });
+      completedHistory.push(role === "user"
+        ? {
+            id: `activity:message:${threadId}:${at}`,
+            kind: "request",
+            actor: { type: "human" },
+            recipients: [{ type: "agent", id: threadId }],
+            summary: "Request received",
+            ...(content ? { content } : {}),
+            status: "completed",
+            occurredAt: at,
+            source: "compatibility",
+          }
+        : {
+            id: `activity:message:${threadId}:${at}`,
+            kind: "delivery",
+            actor: { type: "agent", id: threadId },
+            recipients: [{ type: "human" }],
+            summary: payload.phase === "final_answer" ? "Delivered final result" : "Agent message",
+            ...(content ? { content } : {}),
+            status: "completed",
+            occurredAt: at,
+            source: "compatibility",
+          });
     }
   }
 
@@ -287,6 +432,9 @@ export function parseRolloutState(
   const activities = [...completedActivities, ...openCalls.values()]
     .sort((a, b) => a.startedAt - b.startedAt)
     .slice(-ACTIVITY_LIMIT_PER_THREAD);
+  const history = [...completedHistory, ...openHistory.values()]
+    .sort((a, b) => a.occurredAt - b.occurredAt)
+    .slice(-HISTORY_LIMIT_PER_THREAD);
   return {
     nativeStatus,
     ...(lifecycle ? { lifecycle } : {}),
@@ -296,6 +444,7 @@ export function parseRolloutState(
     observedSkills: [...observedSkills].sort(),
     observedWorkflows: [...observedWorkflows].sort(),
     ...(collaborationMode ? { collaborationMode } : {}),
+    history,
     activities,
   };
 }
@@ -367,6 +516,8 @@ export class SharedStateCodexAdapter implements CodexAdapter {
   #codexVersion = "unknown";
   #seenActivities = new Set<string>();
   #seenActivityOrder: string[] = [];
+  #seenHistory = new Set<string>();
+  #seenHistoryOrder: string[] = [];
   #lastLifecycle = new Map<string, string>();
   #lastThreadFingerprint = new Map<string, string>();
   #rolloutCache = new Map<string, {
@@ -609,6 +760,10 @@ export class SharedStateCodexAdapter implements CodexAdapter {
         .sort((a, b) => a.startedAt - b.startedAt)
         .slice(-GLOBAL_ACTIVITY_LIMIT);
       for (const activity of activities) this.#projectActivity(activity);
+      const history = [...next.values()]
+        .flatMap((thread) => thread.rollout.history)
+        .sort((a, b) => a.occurredAt - b.occurredAt);
+      for (const item of history) this.#projectHistory(item);
     } finally {
       this.#refreshing = false;
       if (this.#refreshQueued) {
@@ -661,6 +816,18 @@ export class SharedStateCodexAdapter implements CodexAdapter {
     } else {
       this.#emit({ type: "activity.started", at: activity.startedAt, activity });
     }
+  }
+
+  #projectHistory(history: HistoryEvent): void {
+    const key = `${history.id}:${history.status ?? "recorded"}`;
+    if (this.#seenHistory.has(key)) return;
+    this.#seenHistory.add(key);
+    this.#seenHistoryOrder.push(key);
+    while (this.#seenHistoryOrder.length > SEEN_HISTORY_LIMIT) {
+      const oldest = this.#seenHistoryOrder.shift();
+      if (oldest) this.#seenHistory.delete(oldest);
+    }
+    this.#emit({ type: "history.recorded", at: history.occurredAt, history });
   }
 
   #rememberActivity(key: string): void {
