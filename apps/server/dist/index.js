@@ -654,10 +654,7 @@ var RealCodexAdapter = class {
 };
 
 // apps/server/src/http-server.ts
-import { timingSafeEqual } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
 import { createServer } from "node:http";
-import path, { extname } from "node:path";
 
 // packages/observatory-core/src/projector.ts
 var DEFAULT_ACTIVITY_LIMIT = 300;
@@ -973,11 +970,17 @@ var ObservatoryStore = class {
   }
 };
 
-// apps/server/src/http-server.ts
-import { WebSocketServer, WebSocket } from "ws";
-var MAX_WEBSOCKET_PAYLOAD_BYTES = 8 * 1024;
-var DEFAULT_RETRY_WINDOW_MS = 1e3;
-var OBSERVATORY_SESSION_COOKIE = "observatory_session";
+// apps/server/src/http/public-payload.ts
+function publicSnapshot(snapshot) {
+  return { ...snapshot, debug: snapshot.debug.map(({ payload: _payload, ...entry }) => entry) };
+}
+function publicEvent(event) {
+  if (event.type !== "debug") return event;
+  const { payload: _payload, ...entry } = event.entry;
+  return { ...event, entry };
+}
+
+// apps/server/src/http/request-security.ts
 var securityHeaders = {
   "cache-control": "no-store",
   "content-security-policy": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'",
@@ -985,15 +988,12 @@ var securityHeaders = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY"
 };
-var contentTypes = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".json": "application/json; charset=utf-8"
-};
 function sendJson(response, status, body, headers = {}) {
-  response.writeHead(status, { ...securityHeaders, "content-type": "application/json; charset=utf-8", ...headers });
+  response.writeHead(status, {
+    ...securityHeaders,
+    "content-type": "application/json; charset=utf-8",
+    ...headers
+  });
   response.end(JSON.stringify(body));
 }
 function requestAuthority(request) {
@@ -1009,10 +1009,19 @@ function hasTrustedOrigin(request, authority, devWebOrigins2 = [], requireOrigin
   if (!origin) return !requireOrigin;
   return origin === authority || devWebOrigins2.includes(origin);
 }
-function isPathWithin(root, candidate, pathOperations = path) {
-  const relativePath = pathOperations.relative(pathOperations.resolve(root), pathOperations.resolve(candidate));
-  return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${pathOperations.sep}`) && !pathOperations.isAbsolute(relativePath);
+function rejectUpgrade(socket, status) {
+  const reason = status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : "Not Found";
+  socket.end(`HTTP/1.1 ${status} ${reason}\r
+Connection: close\r
+Cache-Control: no-store\r
+Content-Length: 0\r
+\r
+`);
 }
+
+// apps/server/src/http/session-auth.ts
+import { timingSafeEqual } from "node:crypto";
+var OBSERVATORY_SESSION_COOKIE = "observatory_session";
 function tokenMatches(provided, expected) {
   if (!provided) return false;
   const actualBuffer = Buffer.from(provided);
@@ -1033,31 +1042,137 @@ function sessionToken(request) {
   }
   return void 0;
 }
-function sessionCookie(accessToken2) {
-  return `${OBSERVATORY_SESSION_COOKIE}=${encodeURIComponent(accessToken2)}; HttpOnly; SameSite=Strict; Path=/`;
+function hasSession(request, accessToken2) {
+  return tokenMatches(sessionToken(request), accessToken2);
 }
-function publicSnapshot(snapshot) {
-  return { ...snapshot, debug: snapshot.debug.map(({ payload: _payload, ...entry }) => entry) };
+function handleSessionBootstrap(requestUrl, response, accessToken2, redirectLocation) {
+  if (requestUrl.pathname !== "/" || !requestUrl.searchParams.has("token")) return false;
+  if (!tokenMatches(requestUrl.searchParams.get("token") ?? void 0, accessToken2)) {
+    sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatoryBootstrap" });
+    return true;
+  }
+  response.writeHead(302, {
+    ...securityHeaders,
+    location: redirectLocation,
+    "set-cookie": `${OBSERVATORY_SESSION_COOKIE}=${encodeURIComponent(accessToken2)}; HttpOnly; SameSite=Strict; Path=/`
+  });
+  response.end();
+  return true;
 }
-function publicEvent(event) {
-  if (event.type !== "debug") return event;
-  const { payload: _payload, ...entry } = event.entry;
-  return { ...event, entry };
+
+// apps/server/src/http/api-router.ts
+function handleApiRequest(request, response, requestUrl, options) {
+  if (requestUrl.pathname === "/api/health") {
+    sendJson(response, 200, { ok: true, connection: options.store.snapshot().connection });
+    return true;
+  }
+  if (requestUrl.pathname === "/api/snapshot") {
+    if (!hasSession(request, options.accessToken)) {
+      sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
+      return true;
+    }
+    sendJson(response, 200, publicSnapshot(options.store.snapshot()));
+    return true;
+  }
+  if (requestUrl.pathname === "/api/retry" && request.method === "POST") {
+    if (!hasSession(request, options.accessToken)) {
+      sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
+      return true;
+    }
+    if (!options.retryAllowed()) {
+      sendJson(response, 429, { error: "Retry rate limit exceeded" }, {
+        "retry-after": String(options.retryAfterSeconds)
+      });
+      return true;
+    }
+    void options.connectAdapter().catch(() => void 0);
+    sendJson(response, 202, { accepted: true });
+    return true;
+  }
+  if (!requestUrl.pathname.startsWith("/api/")) return false;
+  sendJson(response, 404, { error: "Not found" });
+  return true;
 }
-function rejectUpgrade(socket, status) {
-  const reason = status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : "Not Found";
-  socket.end(`HTTP/1.1 ${status} ${reason}\r
-Connection: close\r
-Cache-Control: no-store\r
-Content-Length: 0\r
-\r
-`);
+
+// apps/server/src/http/static-files.ts
+import { createReadStream, existsSync } from "node:fs";
+import path, { extname } from "node:path";
+var contentTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".json": "application/json; charset=utf-8"
+};
+function isPathWithin(root, candidate, pathOperations = path) {
+  const relativePath = pathOperations.relative(pathOperations.resolve(root), pathOperations.resolve(candidate));
+  return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${pathOperations.sep}`) && !pathOperations.isAbsolute(relativePath);
 }
+function serveWebAsset(response, requestUrl, webDist2) {
+  if (!existsSync(webDist2)) {
+    sendJson(response, 404, { error: "Web build not found. Run the Vite development server." });
+    return;
+  }
+  const relative = requestUrl.pathname === "/" ? "index.html" : requestUrl.pathname.slice(1);
+  const candidate = path.resolve(webDist2, relative);
+  const safePath = isPathWithin(webDist2, candidate) && existsSync(candidate) ? candidate : path.resolve(webDist2, "index.html");
+  response.writeHead(200, {
+    ...securityHeaders,
+    "cache-control": safePath.endsWith("index.html") ? "no-store" : "public, max-age=3600",
+    "content-type": contentTypes[extname(safePath)] ?? "application/octet-stream"
+  });
+  createReadStream(safePath).pipe(response);
+}
+
+// apps/server/src/http/websocket-server.ts
+import { WebSocket, WebSocketServer } from "ws";
+var MAX_WEBSOCKET_PAYLOAD_BYTES = 8 * 1024;
+function createWebSocketTransport(options) {
+  const webSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES });
+  options.server.on("upgrade", (request, socket, head) => {
+    const authority = requestAuthority(request);
+    if (!authority || !hasTrustedOrigin(request, authority, options.devWebOrigins, true)) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
+    const requestUrl = new URL(request.url ?? "/", authority);
+    if (requestUrl.pathname !== "/ws") {
+      rejectUpgrade(socket, 404);
+      return;
+    }
+    if (!hasSession(request, options.accessToken)) {
+      rejectUpgrade(socket, 401);
+      return;
+    }
+    webSockets.handleUpgrade(request, socket, head, (client) => webSockets.emit("connection", client, request));
+  });
+  webSockets.on("connection", (socket) => {
+    socket.send(JSON.stringify({ type: "snapshot", snapshot: publicSnapshot(options.store.snapshot()) }));
+    socket.on("error", () => void 0);
+    socket.on("message", (message) => {
+      try {
+        const parsed = JSON.parse(message.toString());
+        if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "retry" && options.retryAllowed()) {
+          void options.connectAdapter().catch(() => void 0);
+        }
+      } catch {
+      }
+    });
+  });
+  return webSockets;
+}
+function broadcastSnapshot(webSockets, payload) {
+  for (const client of webSockets.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
+  }
+}
+
+// apps/server/src/http-server.ts
+var DEFAULT_RETRY_WINDOW_MS = 1e3;
 function createObservatoryHttpServer(options) {
   const { accessToken: accessToken2, adapter: adapter2, webDist: webDist2, devWebOrigins: devWebOrigins2 } = options;
   const retryWindowMs = options.retryWindowMs ?? DEFAULT_RETRY_WINDOW_MS;
   const store = new ObservatoryStore(adapter2.runtimeInfo());
-  const clients = /* @__PURE__ */ new Set();
   let connectPromise;
   let connectedOnce = false;
   let lastRetryAt = Number.NEGATIVE_INFINITY;
@@ -1096,12 +1211,6 @@ function createObservatoryHttpServer(options) {
     }
     store.apply(event);
   });
-  store.subscribe((snapshot, event) => {
-    const payload = JSON.stringify({ type: "snapshot", snapshot: publicSnapshot(snapshot), event: publicEvent(event) });
-    for (const client of clients) {
-      if (client.readyState === WebSocket.OPEN) client.send(payload);
-    }
-  });
   const server2 = createServer((request, response) => {
     const authority = requestAuthority(request);
     if (!authority || !hasTrustedOrigin(request, authority, devWebOrigins2)) {
@@ -1109,99 +1218,35 @@ function createObservatoryHttpServer(options) {
       return;
     }
     const requestUrl = new URL(request.url ?? "/", authority);
-    if (requestUrl.pathname === "/" && requestUrl.searchParams.has("token")) {
-      if (!tokenMatches(requestUrl.searchParams.get("token") ?? void 0, accessToken2)) {
-        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatoryBootstrap" });
-        return;
-      }
-      response.writeHead(302, {
-        ...securityHeaders,
-        location: devWebOrigins2?.[0] ?? "/",
-        "set-cookie": sessionCookie(accessToken2)
-      });
-      response.end();
-      return;
-    }
-    if (requestUrl.pathname === "/api/health") {
-      sendJson(response, 200, { ok: true, connection: store.snapshot().connection });
-      return;
-    }
-    if (requestUrl.pathname === "/api/snapshot") {
-      if (!tokenMatches(sessionToken(request), accessToken2)) {
-        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
-        return;
-      }
-      sendJson(response, 200, publicSnapshot(store.snapshot()));
-      return;
-    }
-    if (requestUrl.pathname === "/api/retry" && request.method === "POST") {
-      if (!tokenMatches(sessionToken(request), accessToken2)) {
-        sendJson(response, 401, { error: "Unauthorized" }, { "www-authenticate": "ObservatorySession" });
-        return;
-      }
-      if (!retryAllowed()) {
-        sendJson(response, 429, { error: "Retry rate limit exceeded" }, { "retry-after": String(Math.max(1, Math.ceil(retryWindowMs / 1e3))) });
-        return;
-      }
-      void connectAdapter2().catch(() => void 0);
-      sendJson(response, 202, { accepted: true });
-      return;
-    }
-    if (requestUrl.pathname.startsWith("/api/")) {
-      sendJson(response, 404, { error: "Not found" });
-      return;
-    }
-    if (requestUrl.pathname === "/" && devWebOrigins2?.[0] && tokenMatches(sessionToken(request), accessToken2)) {
+    if (handleSessionBootstrap(requestUrl, response, accessToken2, devWebOrigins2?.[0] ?? "/")) return;
+    if (handleApiRequest(request, response, requestUrl, {
+      accessToken: accessToken2,
+      connectAdapter: connectAdapter2,
+      retryAllowed,
+      retryAfterSeconds: Math.max(1, Math.ceil(retryWindowMs / 1e3)),
+      store
+    })) return;
+    if (requestUrl.pathname === "/" && devWebOrigins2?.[0] && hasSession(request, accessToken2)) {
       response.writeHead(302, { ...securityHeaders, location: devWebOrigins2[0] });
       response.end();
       return;
     }
-    if (!existsSync(webDist2)) {
-      sendJson(response, 404, { error: "Web build not found. Run the Vite development server." });
-      return;
-    }
-    const relative = requestUrl.pathname === "/" ? "index.html" : requestUrl.pathname.slice(1);
-    const candidate = path.resolve(webDist2, relative);
-    const safePath = isPathWithin(webDist2, candidate) && existsSync(candidate) ? candidate : path.resolve(webDist2, "index.html");
-    response.writeHead(200, {
-      ...securityHeaders,
-      "cache-control": safePath.endsWith("index.html") ? "no-store" : "public, max-age=3600",
-      "content-type": contentTypes[extname(safePath)] ?? "application/octet-stream"
-    });
-    createReadStream(safePath).pipe(response);
+    serveWebAsset(response, requestUrl, webDist2);
   });
-  const webSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES });
-  server2.on("upgrade", (request, socket, head) => {
-    const authority = requestAuthority(request);
-    if (!authority || !hasTrustedOrigin(request, authority, devWebOrigins2, true)) {
-      rejectUpgrade(socket, 403);
-      return;
-    }
-    const requestUrl = new URL(request.url ?? "/", authority);
-    if (requestUrl.pathname !== "/ws") {
-      rejectUpgrade(socket, 404);
-      return;
-    }
-    if (!tokenMatches(sessionToken(request), accessToken2)) {
-      rejectUpgrade(socket, 401);
-      return;
-    }
-    webSockets.handleUpgrade(request, socket, head, (client) => webSockets.emit("connection", client, request));
+  const webSockets = createWebSocketTransport({
+    accessToken: accessToken2,
+    connectAdapter: connectAdapter2,
+    devWebOrigins: devWebOrigins2,
+    retryAllowed,
+    server: server2,
+    store
   });
-  webSockets.on("connection", (socket) => {
-    clients.add(socket);
-    socket.send(JSON.stringify({ type: "snapshot", snapshot: publicSnapshot(store.snapshot()) }));
-    socket.on("close", () => clients.delete(socket));
-    socket.on("error", () => clients.delete(socket));
-    socket.on("message", (message) => {
-      try {
-        const parsed = JSON.parse(message.toString());
-        if (typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "retry" && retryAllowed()) {
-          void connectAdapter2().catch(() => void 0);
-        }
-      } catch {
-      }
-    });
+  store.subscribe((snapshot, event) => {
+    broadcastSnapshot(webSockets, JSON.stringify({
+      type: "snapshot",
+      snapshot: publicSnapshot(snapshot),
+      event: publicEvent(event)
+    }));
   });
   return { server: server2, webSockets, connectAdapter: connectAdapter2, store };
 }
