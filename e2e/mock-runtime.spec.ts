@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 
 test("mock runtime updates the agent graph through completion and waiting", async ({ page }) => {
-  await page.goto("/");
+  const accessToken = process.env.OBSERVATORY_E2E_ACCESS_TOKEN;
+  expect(accessToken).toBeTruthy();
+  await page.goto(`/?token=${encodeURIComponent(accessToken ?? "")}`);
   await expect(page.getByRole("heading", { name: "Codex Observatory" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Connected");
 
