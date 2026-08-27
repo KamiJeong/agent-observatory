@@ -10,13 +10,14 @@ import type {
   ThreadSnapshot,
 } from "@observatory/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebSocket } from "ws";
+import { WebSocket, type WebSocketServer } from "ws";
 import {
   createObservatoryHttpServer,
   isPathWithin,
   OBSERVATORY_SESSION_COOKIE,
 } from "./http-server.ts";
 import { publicEvent } from "./http/public-payload.ts";
+import { LatestSnapshotBroadcaster } from "./http/websocket-server.ts";
 
 const ACCESS_TOKEN = "test-access-token-with-enough-entropy";
 const SESSION_COOKIE = `${OBSERVATORY_SESSION_COOKIE}=${encodeURIComponent(ACCESS_TOKEN)}`;
@@ -220,6 +221,44 @@ describe("Observatory HTTP trust boundary", () => {
     expect(closeCode).toBe(1009);
   });
 
+  it("coalesces a synchronous event burst into the latest snapshot", async () => {
+    const wsBase = baseUrl.replace("http:", "ws:");
+    const socket = new WebSocket(`${wsBase}/ws`, {
+      origin: baseUrl,
+      headers: { cookie: SESSION_COOKIE },
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("message", () => resolve());
+      socket.once("error", reject);
+    });
+    const messages: string[] = [];
+    socket.on("message", (data) => messages.push(data.toString()));
+
+    for (let index = 0; index < 3; index += 1) {
+      adapter.emit({
+        type: "thread.discovered",
+        at: index + 1,
+        thread: { id: `thread-${index}`, nativeStatus: { type: "idle" } },
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    socket.close();
+
+    expect(messages).toHaveLength(1);
+    expect(JSON.parse(messages[0]!)).toMatchObject({
+      type: "snapshot",
+      snapshot: {
+        revision: 3,
+        agents: {
+          "thread-0": { id: "thread-0" },
+          "thread-1": { id: "thread-1" },
+          "thread-2": { id: "thread-2" },
+        },
+      },
+      event: { type: "thread.discovered", thread: { id: "thread-2" } },
+    });
+  });
+
   it("coalesces concurrent retries and rate limits repeated requests", async () => {
     let finishConnect: (() => void) | undefined;
     adapter.setConnectResult(new Promise<void>((resolve) => { finishConnect = resolve; }));
@@ -348,6 +387,50 @@ describe("Observatory HTTP trust boundary", () => {
     })).toEqual(expect.objectContaining({
       thread: expect.not.objectContaining({ source: expect.anything() }),
     }));
+  });
+});
+
+describe("latest snapshot broadcaster", () => {
+  it("does not serialize snapshots without connected clients", async () => {
+    const webSockets = { clients: new Set<WebSocket>() } as unknown as WebSocketServer;
+    const broadcaster = new LatestSnapshotBroadcaster(webSockets);
+    let serialized = 0;
+
+    broadcaster.publish(() => {
+      serialized += 1;
+      return "unused";
+    });
+    await Promise.resolve();
+
+    expect(serialized).toBe(0);
+  });
+
+  it("coalesces bursts and retains only the latest snapshot for a slow client", async () => {
+    const sent: string[] = [];
+    const completions: Array<(error?: Error) => void> = [];
+    const client = {
+      readyState: WebSocket.OPEN,
+      send(payload: string, callback: (error?: Error) => void) {
+        sent.push(payload);
+        completions.push(callback);
+      },
+    } as unknown as WebSocket;
+    const webSockets = { clients: new Set([client]) } as unknown as WebSocketServer;
+    const broadcaster = new LatestSnapshotBroadcaster(webSockets);
+
+    broadcaster.publish(() => "snapshot-1");
+    broadcaster.publish(() => "snapshot-2");
+    broadcaster.publish(() => "snapshot-3");
+    await Promise.resolve();
+    expect(sent).toEqual(["snapshot-3"]);
+
+    broadcaster.publish(() => "snapshot-4");
+    broadcaster.publish(() => "snapshot-5");
+    await Promise.resolve();
+    expect(sent).toEqual(["snapshot-3"]);
+
+    completions.shift()?.();
+    expect(sent).toEqual(["snapshot-3", "snapshot-5"]);
   });
 });
 

@@ -7,6 +7,7 @@ import {
   readSync,
   readdirSync,
   readlinkSync,
+  statSync,
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -34,6 +35,7 @@ import { contentCaptureEnabled } from "./content-capture.ts";
 import { OBSERVATORY_VERSION } from "./version.ts";
 
 const TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
+const TRANSCRIPT_METADATA_BYTES = 64 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const HISTORY_LIMIT = 80;
 const ACTIVITY_LIMIT = 50;
@@ -88,6 +90,15 @@ export interface ClaudeTranscriptCandidate {
   path: string;
   cwd?: string;
   updatedAt?: number;
+}
+
+interface CachedClaudeTranscriptCandidate {
+  size: number;
+  mtimeMs: number;
+  candidate: ClaudeTranscriptCandidate & {
+    projectDir: string;
+    sessionId: string;
+  };
 }
 
 export interface ClaudeAdapterOptions {
@@ -694,6 +705,30 @@ function readTail(path: string, maxBytes = TRANSCRIPT_TAIL_BYTES): { text: strin
   }
 }
 
+function readPrefix(path: string, maxBytes = TRANSCRIPT_METADATA_BYTES): string {
+  const fd = openSync(path, "r");
+  try {
+    const length = Math.min(fstatSync(fd).size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    if (length > 0) readSync(fd, buffer, 0, length, 0);
+    return buffer.toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function jsonStringField(text: string, field: string): string | undefined {
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = text.match(new RegExp(`"${escapedField}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`));
+  if (!match?.[1]) return undefined;
+  try {
+    const value: unknown = JSON.parse(match[1]);
+    return stringValue(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function parseSubagentMeta(path: string): ClaudeSubagentMeta | undefined {
   try {
     const parsed = recordValue(JSON.parse(readFileSync(path, "utf8")));
@@ -818,10 +853,12 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   #listeners = new Set<(event: AgentRuntimeEvent) => void>();
   #threads = new Map<string, ObservedClaudeThread>();
   #emittedThreads = new Map<string, ObservedClaudeThread>();
-  #seenActivities = new Set<string>();
-  #seenHistory = new Set<string>();
+  #activityFingerprints = new Map<string, string>();
+  #historyFingerprints = new Map<string, string>();
   #seenRequests = new Set<string>();
   #lifecycle = new Map<string, ParsedClaudeTranscript["lifecycle"]>();
+  #transcriptMetadataCache = new Map<string, CachedClaudeTranscriptCandidate>();
+  #lastDiscoveryWarning?: string;
   #timer?: ReturnType<typeof setInterval>;
   #connected = false;
   #version = "unknown";
@@ -942,12 +979,20 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       this.#forgetThreadEvidence(thread);
       this.#emit({ type: "thread.removed", at: this.#now(), threadId: id });
     }
-    for (const thread of observed) this.#emitThread(thread);
+    for (const thread of observed) this.#emitThread(thread, this.#emittedThreads.get(thread.snapshot.id));
+    this.#pruneEvidence(observed);
     this.#emittedThreads = new Map(observed.map((thread) => [thread.snapshot.id, thread]));
-    if (processDiscovery.warning) this.#debug(processDiscovery.warning);
+    if (processDiscovery.warning && processDiscovery.warning !== this.#lastDiscoveryWarning) {
+      this.#debug(processDiscovery.warning);
+    }
+    this.#lastDiscoveryWarning = processDiscovery.warning;
   }
 
   #scanTranscripts(processDiscovery: ClaudeProcessDiscovery): ObservedClaudeThread[] {
+    if (processDiscovery.processCount === 0) {
+      this.#transcriptMetadataCache.clear();
+      return [];
+    }
     const projectsRoot = join(this.#claudeHome, "projects");
     let projectDirs: string[];
     try {
@@ -960,8 +1005,8 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
     const candidates: Array<ClaudeTranscriptCandidate & {
       projectDir: string;
       sessionId: string;
-      rootTail: { text: string; stat: Stats };
     }> = [];
+    const candidatePaths = new Set<string>();
     for (const projectDir of projectDirs) {
       let files: string[];
       try {
@@ -971,31 +1016,53 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       }
       for (const file of files) {
         const path = join(projectDir, file);
+        candidatePaths.add(path);
         const fallbackSessionId = file.slice(0, -".jsonl".length);
-        let rootTail: ReturnType<typeof readTail>;
+        let stat: Stats;
         try {
-          rootTail = readTail(path);
+          stat = statSync(path);
         } catch {
           continue;
         }
-        const sessionId = this.#sessionId(rootTail.text) ?? fallbackSessionId;
-        const fallbackCwd = this.#transcriptCwd(rootTail.text);
-        candidates.push({
+        const cached = this.#transcriptMetadataCache.get(path);
+        if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+          candidates.push(cached.candidate);
+          continue;
+        }
+        let prefix = "";
+        try {
+          prefix = readPrefix(path);
+        } catch {
+          continue;
+        }
+        const sessionId = jsonStringField(prefix, "sessionId") ?? fallbackSessionId;
+        const fallbackCwd = jsonStringField(prefix, "cwd");
+        const candidate = {
           path,
           projectDir,
           sessionId,
-          rootTail,
           ...(fallbackCwd ? { cwd: fallbackCwd } : {}),
-          updatedAt: rootTail.stat.mtimeMs,
-        });
+          updatedAt: stat.mtimeMs,
+        };
+        candidates.push(candidate);
+        this.#transcriptMetadataCache.set(path, { size: stat.size, mtimeMs: stat.mtimeMs, candidate });
       }
+    }
+    for (const path of this.#transcriptMetadataCache.keys()) {
+      if (!candidatePaths.has(path)) this.#transcriptMetadataCache.delete(path);
     }
 
     const selectedPaths = selectActiveClaudeTranscriptPaths(candidates, processDiscovery, this.#cwd);
     const results: ObservedClaudeThread[] = [];
     for (const candidate of candidates) {
       if (!selectedPaths.has(candidate.path)) continue;
-      const { path, projectDir, sessionId, rootTail } = candidate;
+      const { path, projectDir, sessionId } = candidate;
+      let rootTail: ReturnType<typeof readTail>;
+      try {
+        rootTail = readTail(path);
+      } catch {
+        continue;
+      }
       const fallbackCwd = candidate.cwd;
       const rootId = namespaceRoot(sessionId);
       const processActive = true;
@@ -1060,35 +1127,36 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
   }
 
   #forgetThreadEvidence(thread: ObservedClaudeThread): void {
-    for (const activity of thread.activities) this.#seenActivities.delete(activity.id);
-    for (const history of thread.history) this.#seenHistory.delete(history.id);
+    for (const activity of thread.activities) this.#activityFingerprints.delete(activity.id);
+    for (const history of thread.history) this.#historyFingerprints.delete(history.id);
     for (const request of thread.pendingRequests) this.#seenRequests.delete(request.id);
     this.#lifecycle.delete(thread.snapshot.id);
   }
 
-  #sessionId(text: string): string | undefined {
-    for (const line of text.split("\n")) {
-      const sessionId = stringValue(parseJsonRecord(line)?.sessionId);
-      if (sessionId) return sessionId;
+  #pruneEvidence(threads: ObservedClaudeThread[]): void {
+    const activityIds = new Set(threads.flatMap((thread) => thread.activities.map((activity) => activity.id)));
+    const historyIds = new Set(threads.flatMap((thread) => thread.history.map((history) => history.id)));
+    for (const id of this.#activityFingerprints.keys()) {
+      if (!activityIds.has(id)) this.#activityFingerprints.delete(id);
     }
-    return undefined;
+    for (const id of this.#historyFingerprints.keys()) {
+      if (!historyIds.has(id)) this.#historyFingerprints.delete(id);
+    }
   }
 
-  #transcriptCwd(text: string): string | undefined {
-    for (const line of text.split("\n")) {
-      const cwd = stringValue(parseJsonRecord(line)?.cwd);
-      if (cwd) return cwd;
-    }
-    return undefined;
-  }
-
-  #emitThread(thread: ObservedClaudeThread): void {
+  #emitThread(thread: ObservedClaudeThread, previous?: ObservedClaudeThread): void {
     const at = this.#now();
-    this.#emit({ type: "thread.discovered", at, thread: thread.snapshot });
+    if (!previous || JSON.stringify(previous.snapshot) !== JSON.stringify(thread.snapshot)) {
+      this.#emit({ type: "thread.discovered", at, thread: thread.snapshot });
+    }
     for (const activity of thread.activities) {
-      if (this.#seenActivities.has(activity.id)) continue;
-      this.#seenActivities.add(activity.id);
-      this.#emit({ type: "activity.started", at: activity.startedAt, activity });
+      const fingerprint = JSON.stringify(activity);
+      const previousFingerprint = this.#activityFingerprints.get(activity.id);
+      if (previousFingerprint === fingerprint) continue;
+      this.#activityFingerprints.set(activity.id, fingerprint);
+      if (previousFingerprint === undefined || activity.completedAt === undefined) {
+        this.#emit({ type: "activity.started", at: activity.startedAt, activity });
+      }
       if (activity.completedAt !== undefined) {
         this.#emit({
           type: "activity.completed",
@@ -1101,8 +1169,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       }
     }
     for (const history of thread.history) {
-      if (this.#seenHistory.has(history.id)) continue;
-      this.#seenHistory.add(history.id);
+      const fingerprint = JSON.stringify(history);
+      if (this.#historyFingerprints.get(history.id) === fingerprint) continue;
+      this.#historyFingerprints.set(history.id, fingerprint);
       this.#emit({ type: "history.recorded", at: history.occurredAt, history });
     }
     const openRequestIds = new Set(thread.pendingRequests.map((request) => request.id));
@@ -1116,7 +1185,9 @@ export class ClaudeCodeAdapter implements AgentRuntimeAdapter {
       this.#seenRequests.delete(requestId);
       this.#emit({ type: "request.resolved", at, requestId, threadId: thread.snapshot.id });
     }
-    if (thread.usage) this.#emit({ type: "token.updated", at, threadId: thread.snapshot.id, usage: thread.usage });
+    if (thread.usage && (!previous || JSON.stringify(previous.usage) !== JSON.stringify(thread.usage))) {
+      this.#emit({ type: "token.updated", at, threadId: thread.snapshot.id, usage: thread.usage });
+    }
     const previousLifecycle = this.#lifecycle.get(thread.snapshot.id);
     if (thread.lifecycle && previousLifecycle !== thread.lifecycle) {
       this.#lifecycle.set(thread.snapshot.id, thread.lifecycle);

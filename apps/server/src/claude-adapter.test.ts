@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +19,7 @@ import {
 } from "./claude-team-observer.ts";
 
 const fixtureDir = fileURLToPath(new URL("./test-fixtures/claude", import.meta.url));
+const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const temporaryDirectories: string[] = [];
 
 function temporaryDirectory(): string {
@@ -334,6 +336,50 @@ describe("Claude adapter", () => {
     expect(threads.every((thread) => thread.id !== "claude:session-old")).toBe(true);
   });
 
+  it("keeps archived transcript scanning below a constrained Node heap", () => {
+    const claudeHome = temporaryDirectory();
+    const projectDir = join(claudeHome, "projects", "-workspace-demo");
+    const archivedPayload = "가".repeat(400_000);
+    for (let index = 0; index < 80; index += 1) {
+      write(join(projectDir, `archived-${index}.jsonl`), JSON.stringify({
+        type: "user",
+        sessionId: `archived-${index}`,
+        cwd: "/workspace/demo",
+        message: { role: "user", content: archivedPayload },
+      }));
+    }
+    const activePath = join(projectDir, "session-1.jsonl");
+    write(activePath, fixture("root.jsonl"));
+    const script = `
+      import { ClaudeCodeAdapter } from "./apps/server/src/claude-adapter.ts";
+      const activePath = ${JSON.stringify(activePath)};
+      const adapter = new ClaudeCodeAdapter({
+        claudeHome: ${JSON.stringify(claudeHome)},
+        cwd: "all",
+        processDiscovery: () => ({
+          cwdCounts: new Map([["/workspace/demo", 1]]),
+          processCount: 1,
+          exact: true,
+          source: "procfs",
+          openRootTranscriptPaths: new Set([activePath]),
+        }),
+      });
+      const threads = await adapter.listThreads();
+      if (threads.length !== 1 || threads[0]?.id !== "claude:session-1") process.exit(2);
+    `;
+
+    const result = spawnSync("node", [
+      "--max-old-space-size=64",
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "--eval",
+      script,
+    ], { cwd: repositoryRoot, encoding: "utf8", timeout: 20_000 });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  });
+
   it("discovers a namespaced root and subagent with a mapped parent", async () => {
     const claudeHome = temporaryDirectory();
     const projectDir = join(claudeHome, "projects", "-workspace-demo");
@@ -366,14 +412,14 @@ describe("Claude adapter", () => {
     expect((await adapter.readThread("session-1")).id).toBe("claude:session-1");
   });
 
-  it("emits sanitized compatibility events once", async () => {
+  it("does not re-emit unchanged thread and token snapshots while polling", async () => {
     const claudeHome = temporaryDirectory();
     const projectDir = join(claudeHome, "projects", "-workspace-demo");
     write(join(projectDir, "session-1.jsonl"), fixture("root.jsonl"));
     const adapter = new ClaudeCodeAdapter({
       claudeHome,
       cwd: "/workspace/demo",
-      pollIntervalMs: 60_000,
+      pollIntervalMs: 10,
       processDiscovery: () => ({
         cwdCounts: new Map([["/workspace/demo", 1]]), processCount: 1, exact: true, source: "procfs",
       }),
@@ -381,13 +427,49 @@ describe("Claude adapter", () => {
     const events: AgentRuntimeEvent[] = [];
     adapter.subscribe((event) => events.push(event));
     await adapter.connect();
-    await adapter.listThreads();
+    await new Promise((resolve) => setTimeout(resolve, 35));
     await adapter.disconnect();
 
-    expect(events.some((event) => event.type === "thread.discovered")).toBe(true);
+    expect(events.filter((event) => event.type === "thread.discovered")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "token.updated")).toHaveLength(1);
     expect(events.filter((event) => event.type === "activity.started")).toHaveLength(1);
     expect(events.filter((event) => event.type === "history.recorded")).toHaveLength(2);
     expect(JSON.stringify(events)).not.toContain("private");
+  });
+
+  it("emits an activity completion when an open tool finishes on a later poll", async () => {
+    const claudeHome = temporaryDirectory();
+    const transcriptPath = join(claudeHome, "projects", "-workspace-demo", "session-1.jsonl");
+    const lines = fixture("root.jsonl").trim().split("\n");
+    write(transcriptPath, lines.slice(0, 2).join("\n"));
+    const adapter = new ClaudeCodeAdapter({
+      claudeHome,
+      cwd: "/workspace/demo",
+      pollIntervalMs: 10,
+      processDiscovery: () => ({
+        cwdCounts: new Map([["/workspace/demo", 1]]), processCount: 1, exact: true, source: "procfs",
+      }),
+    });
+    const events: AgentRuntimeEvent[] = [];
+    adapter.subscribe((event) => events.push(event));
+    await adapter.connect();
+
+    write(transcriptPath, lines.slice(0, 3).join("\n"));
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    await adapter.disconnect();
+
+    const activityEvents = events.filter((event) => (
+      event.type === "activity.started" || event.type === "activity.completed"
+    ));
+    expect(activityEvents.map((event) => event.type)).toEqual([
+      "activity.started",
+      "activity.completed",
+    ]);
+    expect(activityEvents[1]).toMatchObject({
+      type: "activity.completed",
+      activityId: "claude:session-1:activity:tool-agent-1",
+      outcome: "completed",
+    });
   });
 
   it("distinguishes a team lead and teammate and normalizes task, message, idle, and shutdown evidence", async () => {

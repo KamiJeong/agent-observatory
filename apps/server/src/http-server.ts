@@ -6,7 +6,7 @@ import { publicEvent, publicSnapshot } from "./http/public-payload.ts";
 import { hasTrustedOrigin, requestAuthority, securityHeaders, sendJson } from "./http/request-security.ts";
 import { handleSessionBootstrap, hasSession, OBSERVATORY_SESSION_COOKIE } from "./http/session-auth.ts";
 import { isPathWithin, serveWebAsset } from "./http/static-files.ts";
-import { broadcastSnapshot, createWebSocketTransport } from "./http/websocket-server.ts";
+import { createWebSocketTransport, LatestSnapshotBroadcaster } from "./http/websocket-server.ts";
 
 const DEFAULT_RETRY_WINDOW_MS = 1_000;
 
@@ -100,8 +100,9 @@ export function createObservatoryHttpServer(options: ObservatoryHttpServerOption
     server,
     store,
   });
+  const snapshotBroadcaster = new LatestSnapshotBroadcaster(webSockets);
   store.subscribe((snapshot, event) => {
-    broadcastSnapshot(webSockets, JSON.stringify({
+    snapshotBroadcaster.publish(() => JSON.stringify({
       type: "snapshot",
       snapshot: publicSnapshot(snapshot),
       event: publicEvent(event),
