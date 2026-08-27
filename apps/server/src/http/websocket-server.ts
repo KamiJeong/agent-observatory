@@ -52,8 +52,58 @@ export function createWebSocketTransport(options: WebSocketTransportOptions): We
   return webSockets;
 }
 
-export function broadcastSnapshot(webSockets: WebSocketServer, payload: string): void {
-  for (const client of webSockets.clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
+interface ClientSendState {
+  pending?: string;
+  sending: boolean;
+}
+
+export class LatestSnapshotBroadcaster {
+  #clientStates = new WeakMap<WebSocket, ClientSendState>();
+  #pendingSerializer?: () => string;
+  #scheduled = false;
+
+  constructor(readonly webSockets: WebSocketServer) {}
+
+  publish(serialize: () => string): void {
+    if (this.webSockets.clients.size === 0) return;
+    this.#pendingSerializer = serialize;
+    if (this.#scheduled) return;
+    this.#scheduled = true;
+    queueMicrotask(() => this.#flush());
+  }
+
+  #flush(): void {
+    this.#scheduled = false;
+    const serialize = this.#pendingSerializer;
+    this.#pendingSerializer = undefined;
+    if (!serialize || this.webSockets.clients.size === 0) return;
+    const payload = serialize();
+    for (const client of this.webSockets.clients) this.#enqueue(client, payload);
+  }
+
+  #enqueue(client: WebSocket, payload: string): void {
+    if (client.readyState !== WebSocket.OPEN) return;
+    const state = this.#clientStates.get(client) ?? { sending: false };
+    this.#clientStates.set(client, state);
+    if (state.sending) {
+      state.pending = payload;
+      return;
+    }
+    state.sending = true;
+    try {
+      client.send(payload, (error) => {
+        state.sending = false;
+        if (error || client.readyState !== WebSocket.OPEN) {
+          state.pending = undefined;
+          return;
+        }
+        const pending = state.pending;
+        state.pending = undefined;
+        if (pending !== undefined) this.#enqueue(client, pending);
+      });
+    } catch {
+      state.sending = false;
+      state.pending = undefined;
+    }
   }
 }
