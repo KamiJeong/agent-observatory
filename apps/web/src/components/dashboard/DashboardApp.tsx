@@ -3,6 +3,7 @@ import type { AgentNode, AgentRuntimeStatus, HistoryActor, ObservatorySnapshot }
 import { uiStore } from "../../ui-store.ts";
 import { DetailRow, RightRail } from "../activity/ActivityPanel.tsx";
 import { AgentGraph } from "../agents/AgentGraph.tsx";
+import { AgentConversation } from "../agents/AgentConversation.tsx";
 import { AgentList } from "../agents/AgentList.tsx";
 import {
   agentProvider,
@@ -422,7 +423,10 @@ export function App() {
   const snapshot = useSyncExternalStore(uiStore.subscribe, uiStore.getSnapshot);
   const now = useNow();
   const [selectedId, setSelectedId] = useState<string>();
+  const [conversationOpen, setConversationOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [agentPanelCollapsed, setAgentPanelCollapsed] = useState(false);
+  const [rightRailCollapsed, setRightRailCollapsed] = useState(false);
   const [visualization, setVisualization] = useState<"graph" | "workflow">("graph");
   const [filters, setFilters] = useState<DashboardFilterState>(INITIAL_DASHBOARD_FILTERS);
   const openDebug = useCallback(() => setDebugOpen(true), []);
@@ -430,8 +434,15 @@ export function App() {
   const filteredSnapshot = useMemo(() => filterSnapshot(snapshot, filters), [filters, snapshot]);
   useEffect(() => uiStore.start(), []);
   useEffect(() => {
-    if (selectedId && !filteredSnapshot.agents[selectedId]) setSelectedId(undefined);
+    if (selectedId && !filteredSnapshot.agents[selectedId]) {
+      setSelectedId(undefined);
+      setConversationOpen(false);
+    }
   }, [filteredSnapshot.agents, selectedId]);
+  const selectGraphAgent = useCallback((id: string) => {
+    setSelectedId(id);
+    setConversationOpen(true);
+  }, []);
 
   const agents = Object.values(filteredSnapshot.agents);
   const allAgents = Object.values(snapshot.agents);
@@ -487,18 +498,47 @@ export function App() {
         ) : agents.length === 0 ? (
           <NoFilterMatches onClear={() => setFilters(INITIAL_DASHBOARD_FILTERS)} />
         ) : (
-          <div className="workspace">
-            <AgentList snapshot={filteredSnapshot} selectedId={selectedId} onSelect={setSelectedId} />
-            <div className="visualization">
+          <div
+            className="workspace"
+            data-agent-panel-collapsed={agentPanelCollapsed || undefined}
+            data-right-rail-collapsed={rightRailCollapsed || undefined}
+          >
+            <AgentList
+              snapshot={filteredSnapshot}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              collapsed={agentPanelCollapsed}
+              onToggleCollapse={() => setAgentPanelCollapsed((collapsed) => !collapsed)}
+            />
+            <div
+              className="visualization"
+              data-conversation-open={visualization === "graph" && conversationOpen && selectedId ? "true" : undefined}
+            >
               <div className="visualization-tabs" role="group" aria-label="Agent visualization">
                 <button aria-pressed={visualization === "graph"} onClick={() => setVisualization("graph")}>Graph</button>
                 <button aria-pressed={visualization === "workflow"} onClick={() => setVisualization("workflow")}>Workflows</button>
               </div>
               {visualization === "graph"
-                ? <AgentGraph snapshot={filteredSnapshot} selectedId={selectedId} onSelect={setSelectedId} />
+                ? <div className="visualization__stack">
+                    <AgentGraph snapshot={filteredSnapshot} selectedId={selectedId} onSelect={selectGraphAgent} />
+                    {conversationOpen && selectedId && (
+                      <AgentConversation
+                        snapshot={filteredSnapshot}
+                        selectedId={selectedId}
+                        onClose={() => setConversationOpen(false)}
+                      />
+                    )}
+                  </div>
                 : <WorkflowBoard snapshot={filteredSnapshot} selectedId={selectedId} onSelect={setSelectedId} />}
             </div>
-            <RightRail snapshot={filteredSnapshot} selectedId={selectedId} onClear={() => setSelectedId(undefined)} now={now} />
+            <RightRail
+              snapshot={filteredSnapshot}
+              selectedId={selectedId}
+              onClear={() => setSelectedId(undefined)}
+              now={now}
+              collapsed={rightRailCollapsed}
+              onToggleCollapse={() => setRightRailCollapsed((collapsed) => !collapsed)}
+            />
           </div>
         )}
       </main>

@@ -16,10 +16,14 @@ export function AgentList({
   snapshot,
   selectedId,
   onSelect,
+  collapsed = false,
+  onToggleCollapse,
 }: {
   snapshot: ObservatorySnapshot;
   selectedId?: string;
   onSelect(id: string): void;
+  collapsed?: boolean;
+  onToggleCollapse?(): void;
 }) {
   const [contextFilter, setContextFilter] = useState<AgentContextFilter>("all");
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
@@ -89,20 +93,36 @@ export function AgentList({
     });
   };
   return (
-    <aside className="agent-list panel" aria-labelledby="agents-heading">
-      <div className="panel__heading">
+    <aside className="agent-list panel" aria-labelledby="agents-heading" data-collapsed={collapsed || undefined}>
+      <div className="panel__heading agent-list__heading">
         <h2 id="agents-heading">Agents</h2>
-        <span className="panel__count">{visibleAgents.length}{countIsReduced ? `/${agents.length}` : ""}</span>
+        <div className="panel__heading-actions">
+          {!collapsed && <span className="panel__count">{visibleAgents.length}{countIsReduced ? `/${agents.length}` : ""}</span>}
+          {onToggleCollapse && (
+            <button
+              className="panel-collapse-toggle panel-collapse-toggle--left"
+              type="button"
+              aria-expanded={!collapsed}
+              aria-controls="agent-list-panel-content"
+              aria-label={`${collapsed ? "Expand" : "Collapse"} agents panel`}
+              title={`${collapsed ? "Expand" : "Collapse"} agents panel`}
+              onClick={onToggleCollapse}
+            >
+              <span aria-hidden="true">{collapsed ? "›" : "‹"}</span>
+            </button>
+          )}
+        </div>
       </div>
-      <div className="agent-context-filters" aria-label="Agent context filters">
-        {(["all", "skill", "workflow"] as const).map((option) => (
-          <button key={option} data-active={contextFilter === option || undefined} onClick={() => setContextFilter(option)}>
-            {option === "all" ? "All" : option === "skill" ? "Skills" : "Workflows"}
-          </button>
-        ))}
-      </div>
-      <div className="agent-list__items">
-        {visibleAgents.map((agent) => {
+      <div id="agent-list-panel-content" className="agent-list__content" hidden={collapsed}>
+        <div className="agent-context-filters" aria-label="Agent context filters">
+          {(["all", "skill", "workflow"] as const).map((option) => (
+            <button key={option} data-active={contextFilter === option || undefined} onClick={() => setContextFilter(option)}>
+              {option === "all" ? "All" : option === "skill" ? "Skills" : "Workflows"}
+            </button>
+          ))}
+        </div>
+        <div className="agent-list__items">
+          {visibleAgents.map((agent) => {
           const name = agent.nickname ?? agent.role ?? shortId(agent.id);
           const childCount = agent.children.filter((childId) => Boolean(snapshot.agents[childId])).length;
           const collapsed = collapsedIds.has(agent.id);
@@ -171,13 +191,14 @@ export function AgentList({
               </button>
             </div>
           );
-        })}
-        {visibleAgents.length === 0 && (
-          <div className="empty-state">
-            <span className="empty-state__mark">⌁</span>
-            <p>{agents.length === 0 ? "No agents discovered yet." : "No agents match this context filter."}</p>
-          </div>
-        )}
+          })}
+          {visibleAgents.length === 0 && (
+            <div className="empty-state">
+              <span className="empty-state__mark">⌁</span>
+              <p>{agents.length === 0 ? "No agents discovered yet." : "No agents match this context filter."}</p>
+            </div>
+          )}
+        </div>
       </div>
     </aside>
   );

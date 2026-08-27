@@ -57,8 +57,10 @@ export const AgentGraph = memo(function AgentGraph({
     [snapshot.activities],
   );
   const containerRef = useRef<HTMLDivElement>(null);
+  const cameraRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const view = useRef({ scale: 1, x: 0, y: 0 });
+  const interactionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [scalePercent, setScalePercent] = useState(100);
   const [showAllRelations, setShowAllRelations] = useState(false);
   const scalePercentRef = useRef(100);
@@ -77,6 +79,17 @@ export const AgentGraph = memo(function AgentGraph({
   ));
   const visibleEdges = [...spawnEdges, ...visibleSecondaryEdges];
 
+  const markCameraActive = useCallback(() => {
+    const camera = cameraRef.current;
+    if (!camera) return;
+    camera.dataset.interacting = "true";
+    if (interactionTimer.current) clearTimeout(interactionTimer.current);
+    interactionTimer.current = setTimeout(() => {
+      delete camera.dataset.interacting;
+      interactionTimer.current = undefined;
+    }, 140);
+  }, []);
+
   const applyView = useCallback((next: { scale: number; x: number; y: number }) => {
     const normalized = {
       scale: Math.min(2, Math.max(0.15, next.scale)),
@@ -84,14 +97,24 @@ export const AgentGraph = memo(function AgentGraph({
       y: next.y,
     };
     view.current = normalized;
-    if (canvasRef.current) {
-      canvasRef.current.style.transform = `translate3d(${normalized.x}px, ${normalized.y}px, 0) scale(${normalized.scale})`;
+    if (cameraRef.current) {
+      cameraRef.current.style.transform = `translate3d(${normalized.x}px, ${normalized.y}px, 0)`;
     }
+    if (canvasRef.current) {
+      // CSS zoom performs layout-aware scaling, so Chromium paints text at the
+      // settled size instead of enlarging one permanently composited bitmap.
+      canvasRef.current.style.setProperty("--graph-scale", String(normalized.scale));
+    }
+    markCameraActive();
     const nextPercent = Math.round(normalized.scale * 100);
     if (scalePercentRef.current !== nextPercent) {
       scalePercentRef.current = nextPercent;
       setScalePercent(nextPercent);
     }
+  }, [markCameraActive]);
+
+  useEffect(() => () => {
+    if (interactionTimer.current) clearTimeout(interactionTimer.current);
   }, []);
 
   const zoomAt = useCallback((factor: number, clientX?: number, clientY?: number) => {
@@ -271,14 +294,20 @@ export const AgentGraph = memo(function AgentGraph({
         onKeyDown={handleViewportKeyDown}
       >
         <div
-          className="graph__canvas"
-          ref={canvasRef}
-          style={{
-            width: `${layout.width}px`,
-            height: `${layout.height}px`,
-            transform: "translate3d(0, 0, 0) scale(1)",
-          }}
+          className="graph__camera"
+          ref={cameraRef}
+          style={{ transform: "translate3d(0, 0, 0)" }}
         >
+          <div
+            className="graph__canvas"
+            ref={canvasRef}
+            data-zoom-detail={scalePercent < 62 ? "compact" : scalePercent < 125 ? "default" : "detailed"}
+            style={{
+              width: `${layout.width}px`,
+              height: `${layout.height}px`,
+              "--graph-scale": 1,
+            } as CSSProperties}
+          >
           <svg className="graph__edges" width={layout.width} height={layout.height} aria-hidden="true">
             <defs>
               <marker id="relation-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto" markerUnits="strokeWidth">
@@ -328,6 +357,13 @@ export const AgentGraph = memo(function AgentGraph({
               <button
                 className={`agent-node agent-node--${agent.status}${agent.children.length > 0 ? " agent-node--parent" : ""}`}
                 data-selected={selectedId === agent.id || undefined}
+                data-detail={selectedId === agent.id
+                  ? "detailed"
+                  : scalePercent < 62
+                    ? "compact"
+                    : scalePercent < 125
+                      ? "default"
+                      : "detailed"}
                 style={{
                   transform: `translate(${position.x}px, ${position.y}px)`,
                   "--agent-role-color": roleColor(agent.role),
@@ -345,18 +381,30 @@ export const AgentGraph = memo(function AgentGraph({
               >
                 <span className="agent-node__topline">
                   <span className="agent-node__identity">
-                    <ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} />
+                    <ProviderBadge provider={agentProvider(agent, snapshot.runtime.adapter)} compact />
                     <span
                       className="agent-node__role"
+                      title={agent.role ?? "agent"}
                       onMouseEnter={(event: ReactMouseEvent<HTMLSpanElement>) => showRoleTooltip(event.currentTarget, agent)}
                       onMouseLeave={() => setRoleTooltip(undefined)}
                     >
                       {agent.role ?? "agent"}
                     </span>
                   </span>
+                </span>
+                <strong>{agent.nickname ?? shortId(agent.id)}</strong>
+                <StatusBadge agent={agent} />
+                <span className="agent-node__meta">
+                  {agentRuntimeLabel(agent) && (
+                    <span className="agent-node__runtime" title={agentRuntimeLabel(agent)}>{agentRuntimeLabel(agent)}</span>
+                  )}
                   <span className="agent-node__signals">
-                    {(agent.observedSkills?.length ?? 0) > 0 && <span title={`${agent.observedSkills?.length} observed skill(s)`}>S{agent.observedSkills?.length}</span>}
-                    {(agent.observedWorkflows?.length ?? 0) > 0 && <span title={`${agent.observedWorkflows?.length} observed workflow(s)`}>W{agent.observedWorkflows?.length}</span>}
+                    {(agent.observedSkills?.length ?? 0) > 0 && (
+                      <span className="agent-node__signal agent-node__signal--secondary" title={`${agent.observedSkills?.length} observed skill(s)`}>S{agent.observedSkills?.length}</span>
+                    )}
+                    {(agent.observedWorkflows?.length ?? 0) > 0 && (
+                      <span className="agent-node__signal agent-node__signal--secondary" title={`${agent.observedWorkflows?.length} observed workflow(s)`}>W{agent.observedWorkflows?.length}</span>
+                    )}
                     {agent.children.length > 0 && (
                       <span className="agent-node__children" title={`${agent.children.length} direct child agents`} aria-label={`${agent.children.length} child agents`}>
                         <span aria-hidden="true">↳</span>{agent.children.length}
@@ -365,17 +413,13 @@ export const AgentGraph = memo(function AgentGraph({
                     <span className="agent-node__depth">L{agent.depth ?? 0}</span>
                   </span>
                 </span>
-                <strong>{agent.nickname ?? shortId(agent.id)}</strong>
-                <StatusBadge agent={agent} />
-                {agentRuntimeLabel(agent) && (
-                  <span className="agent-node__runtime" title={agentRuntimeLabel(agent)}>{agentRuntimeLabel(agent)}</span>
-                )}
                 <span className="agent-node__activity" data-current={activity ? "true" : undefined}>
                   {activity?.title ?? (agent.status === "idle" ? "Ready" : "No current activity")}
                 </span>
               </button>
             );
           })}
+          </div>
         </div>
         {Object.keys(snapshot.agents).length === 0 && (
           <div className="graph__empty">

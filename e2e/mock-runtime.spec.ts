@@ -30,9 +30,13 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
 
   await expect(page.getByRole("button", { name: /Researcher, (Working|Completed)/i })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole("button", { name: /Implementer, Working/i })).toBeVisible();
+  await page.locator(".agent-node", { hasText: "Main" }).click();
+  await expect(page.getByRole("region", { name: "Main" })).toBeVisible();
+  await expect(page.getByRole("list", { name: /Main conversation, \d+ messages/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: "History" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByText("Request received")).toBeVisible();
-  await expect(page.getByText("Identify the protocol events needed for agent status projection.")).toBeVisible();
+  const runHistory = page.getByRole("list", { name: /Run history, \d+ events/ });
+  await expect(runHistory.getByText("Request received")).toBeVisible();
+  await expect(runHistory.getByText("Identify the protocol events needed for agent status projection.")).toBeVisible();
   await page.getByRole("button", { name: "Messages" }).click();
   await expect(page.getByRole("list", { name: /Messages, \d+ events/ })).toBeVisible();
   await expect(page.locator(".history-event__route").filter({ hasText: "Main" }).filter({ hasText: "Researcher" }).first()).toBeVisible();
@@ -49,22 +53,58 @@ test("mock runtime updates the agent graph through completion and waiting", asyn
   await expect.poll(() => selectedNode.evaluate((node) => {
     const nodeBounds = node.getBoundingClientRect();
     const activityBounds = node.querySelector(".agent-node__activity")!.getBoundingClientRect();
+    const metaBounds = node.querySelector(".agent-node__meta")!.getBoundingClientRect();
     const runtimeBounds = node.querySelector(".agent-node__runtime")?.getBoundingClientRect();
+    const canvas = node.closest(".graph__canvas")!;
+    const camera = node.closest(".graph__camera")!;
     const selectionShadow = getComputedStyle(node).boxShadow;
     return {
       activityInsideNode: activityBounds.bottom <= nodeBounds.bottom,
       contentDoesNotOverlap: !runtimeBounds || runtimeBounds.bottom <= activityBounds.top,
+      metaInsideNode: metaBounds.right <= nodeBounds.right,
       activityPosition: getComputedStyle(node.querySelector(".agent-node__activity")!).position,
+      canvasUsesLayoutZoom: getComputedStyle(canvas).zoom !== "",
+      canvasTransform: getComputedStyle(canvas).transform,
+      cameraTransformHasScale: camera.getAttribute("style")?.includes("scale(") ?? false,
       hasInnerSelectionRing: selectionShadow.includes("0px 0px 0px 2px"),
       hasOuterSelectionRing: selectionShadow.includes("0px 0px 0px 5px"),
     };
   })).toEqual({
     activityInsideNode: true,
     contentDoesNotOverlap: true,
+    metaInsideNode: true,
     activityPosition: "absolute",
+    canvasUsesLayoutZoom: true,
+    canvasTransform: "none",
+    cameraTransformHasScale: false,
     hasInnerSelectionRing: true,
     hasOuterSelectionRing: true,
   });
+
+  const visualization = page.locator(".visualization");
+  const widthBeforeCollapse = await visualization.evaluate((element) => element.getBoundingClientRect().width);
+  await page.getByRole("button", { name: "Collapse agents panel" }).click();
+  await expect(page.getByRole("button", { name: "Expand agents panel" })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("region", { name: "Implementer" })).toBeVisible();
+  await expect(selectedNode).toHaveCount(1);
+  await expect.poll(() => visualization.evaluate((element) => element.getBoundingClientRect().width))
+    .toBeGreaterThan(widthBeforeCollapse + 150);
+  const widthAfterAgentCollapse = await visualization.evaluate((element) => element.getBoundingClientRect().width);
+
+  await page.getByRole("button", { name: "Collapse activity and inspector panel" }).click();
+  await expect(page.getByRole("button", { name: "Expand activity and inspector panel" })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("region", { name: "Implementer" })).toBeVisible();
+  await expect(selectedNode).toHaveCount(1);
+  await expect.poll(() => visualization.evaluate((element) => element.getBoundingClientRect().width))
+    .toBeGreaterThan(widthBeforeCollapse + 450);
+  await expect.poll(() => page.getByRole("region", { name: "Implementer" }).evaluate((element) => (
+    element.getBoundingClientRect().width === document.querySelector(".visualization")?.getBoundingClientRect().width
+  ))).toBe(true);
+
+  await page.getByRole("button", { name: "Expand agents panel" }).click();
+  await page.getByRole("button", { name: "Expand activity and inspector panel" }).click();
+  await expect.poll(() => visualization.evaluate((element) => element.getBoundingClientRect().width))
+    .toBeLessThan(widthAfterAgentCollapse);
 
   await page.getByRole("button", { name: "Close inspector" }).click();
   await expect(page.getByRole("tab", { name: "History" })).toHaveAttribute("aria-selected", "true");
