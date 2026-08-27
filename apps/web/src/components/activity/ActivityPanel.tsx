@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as React from "react";
 import type { ActivityKind, AgentActivity, AgentNode, ObservatorySnapshot } from "@observatory/core";
 import { agentProvider, formatDuration, formatTime, ProviderBadge, shortId, StatusBadge, type TimelineFilter } from "../shared/presentation.tsx";
 import { RunHistory, type RunHistoryMode } from "./RunHistory.tsx";
 import { agentBranchIds } from "./agent-scope.ts";
+import { useLatestFeed } from "./use-latest-feed.ts";
 
 function filterKinds(filter: TimelineFilter, kind: ActivityKind): boolean {
   if (filter === "all") return true;
@@ -20,13 +21,28 @@ const TIMELINE_OVERSCAN = 6;
 export function ActivityTimeline({ snapshot, selectedId }: { snapshot: ObservatorySnapshot; selectedId?: string }) {
   const [filter, setFilter] = useState<TimelineFilter>("all");
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
-  const listRef = useRef<HTMLOListElement>(null);
-  const previousFirstActivityId = useRef<string | undefined>(undefined);
   const branchIds = useMemo(() => agentBranchIds(snapshot, selectedId), [selectedId, snapshot.agents]);
   const activities = useMemo(
-    () => snapshot.activities.filter((activity) => branchIds.has(activity.agentId) && filterKinds(filter, activity.kind)),
+    () => [...snapshot.activities]
+      .filter((activity) => branchIds.has(activity.agentId) && filterKinds(filter, activity.kind))
+      .sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id)),
     [branchIds, filter, snapshot.activities],
   );
+  const updateViewportAfterJump = useCallback((scrollTop: number, height: number) => {
+    setViewport({ scrollTop, height });
+  }, []);
+  const activityIds = useMemo(() => activities.map((activity) => activity.id), [activities]);
+  const {
+    atLatest,
+    containerRef: listRef,
+    handleScroll: handleLatestScroll,
+    jumpToLatest,
+    newItemCount,
+  } = useLatestFeed<HTMLOListElement>({
+    itemIds: activityIds,
+    scopeKey: `${selectedId ?? "none"}:${filter}`,
+    onJump: updateViewportAfterJump,
+  });
   const firstIndex = Math.max(0, Math.floor(viewport.scrollTop / TIMELINE_ITEM_HEIGHT) - TIMELINE_OVERSCAN);
   const lastIndex = Math.min(
     activities.length,
@@ -49,23 +65,8 @@ export function ActivityTimeline({ snapshot, selectedId }: { snapshot: Observato
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    const list = listRef.current;
-    const previousId = previousFirstActivityId.current;
-    if (list && previousId && list.scrollTop > 0) {
-      const previousIndex = activities.findIndex((activity) => activity.id === previousId);
-      if (previousIndex > 0) {
-        list.scrollTop += previousIndex * TIMELINE_ITEM_HEIGHT;
-        setViewport({ scrollTop: list.scrollTop, height: list.clientHeight });
-      }
-    }
-    previousFirstActivityId.current = activities[0]?.id;
-  }, [activities]);
-
   const selectFilter = (nextFilter: TimelineFilter) => {
     setFilter(nextFilter);
-    if (listRef.current) listRef.current.scrollTop = 0;
-    setViewport((current) => ({ ...current, scrollTop: 0 }));
   };
   return (
     <div className="timeline">
@@ -85,10 +86,13 @@ export function ActivityTimeline({ snapshot, selectedId }: { snapshot: Observato
         className="timeline__list"
         ref={listRef}
         aria-label={`Recent activity, ${activities.length} events`}
-        onScroll={(event) => setViewport({
-          scrollTop: event.currentTarget.scrollTop,
-          height: event.currentTarget.clientHeight,
-        })}
+        onScroll={(event) => {
+          handleLatestScroll(event);
+          setViewport({
+            scrollTop: event.currentTarget.scrollTop,
+            height: event.currentTarget.clientHeight,
+          });
+        }}
       >
         {activities.length > 0 && (
           <li
@@ -127,6 +131,11 @@ export function ActivityTimeline({ snapshot, selectedId }: { snapshot: Observato
           </li>
         )}
       </ol>
+      {!atLatest && activities.length > 0 && (
+        <button className="latest-feed-button" onClick={jumpToLatest}>
+          {newItemCount > 0 ? `${newItemCount} new · ` : ""}Latest ↓
+        </button>
+      )}
     </div>
   );
 }
@@ -303,11 +312,15 @@ export function RightRail({
   selectedId,
   onClear,
   now,
+  collapsed = false,
+  onToggleCollapse,
 }: {
   snapshot: ObservatorySnapshot;
   selectedId?: string;
   onClear(): void;
   now: number;
+  collapsed?: boolean;
+  onToggleCollapse?(): void;
 }) {
   const [tab, setTab] = useState<"activity" | "inspector">("activity");
   const [historyMode, setHistoryMode] = useState<RunHistoryMode | "trace">("story");
@@ -318,28 +331,49 @@ export function RightRail({
     onClear();
   };
   return (
-    <aside className="right-rail panel" aria-label="Activity and agent inspector">
-      <div className="rail-tabs" role="tablist">
-        <button role="tab" aria-selected={tab === "activity"} onClick={() => setTab("activity")}>History</button>
-        <button role="tab" aria-selected={tab === "inspector"} disabled={!agent} onClick={() => setTab("inspector")}>Inspector</button>
-        {agent && <button className="rail-tabs__close" onClick={closeInspector} aria-label="Close inspector">×</button>}
+    <aside className="right-rail panel" aria-label="Activity and agent inspector" data-collapsed={collapsed || undefined}>
+      <div className="rail-tabs" role={collapsed ? undefined : "tablist"}>
+        {collapsed ? (
+          <span className="right-rail__collapsed-label">{agent ? "Inspector" : "History"}</span>
+        ) : (
+          <>
+            <button role="tab" aria-selected={tab === "activity"} onClick={() => setTab("activity")}>History</button>
+            <button role="tab" aria-selected={tab === "inspector"} disabled={!agent} onClick={() => setTab("inspector")}>Inspector</button>
+          </>
+        )}
+        {onToggleCollapse && (
+          <button
+            className="panel-collapse-toggle panel-collapse-toggle--right"
+            type="button"
+            aria-expanded={!collapsed}
+            aria-controls="right-rail-panel-content"
+            aria-label={`${collapsed ? "Expand" : "Collapse"} activity and inspector panel`}
+            title={`${collapsed ? "Expand" : "Collapse"} activity and inspector panel`}
+            onClick={onToggleCollapse}
+          >
+            <span aria-hidden="true">{collapsed ? "‹" : "›"}</span>
+          </button>
+        )}
+        {agent && !collapsed && <button className="rail-tabs__close" onClick={closeInspector} aria-label="Close inspector">×</button>}
       </div>
-      {tab === "inspector" && agent
-        ? <Inspector agent={agent} snapshot={snapshot} now={now} />
-        : (
-            <div className="history-panel">
-              <div className="history-view-tabs" role="group" aria-label="History view">
-                {(["story", "messages", "trace"] as const).map((mode) => (
-                  <button key={mode} aria-pressed={historyMode === mode} onClick={() => setHistoryMode(mode)}>
-                    {mode[0]?.toUpperCase()}{mode.slice(1)}
-                  </button>
-                ))}
+      <div id="right-rail-panel-content" className="right-rail__content" hidden={collapsed}>
+        {tab === "inspector" && agent
+          ? <Inspector agent={agent} snapshot={snapshot} now={now} />
+          : (
+              <div className="history-panel">
+                <div className="history-view-tabs" role="group" aria-label="History view">
+                  {(["story", "messages", "trace"] as const).map((mode) => (
+                    <button key={mode} aria-pressed={historyMode === mode} onClick={() => setHistoryMode(mode)}>
+                      {mode[0]?.toUpperCase()}{mode.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                {historyMode === "trace"
+                  ? <ActivityTimeline snapshot={snapshot} selectedId={selectedId} />
+                  : <RunHistory snapshot={snapshot} selectedId={selectedId} mode={historyMode} />}
               </div>
-              {historyMode === "trace"
-                ? <ActivityTimeline snapshot={snapshot} selectedId={selectedId} />
-                : <RunHistory snapshot={snapshot} selectedId={selectedId} mode={historyMode} />}
-            </div>
-          )}
+            )}
+      </div>
     </aside>
   );
 }

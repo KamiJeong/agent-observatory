@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ObservatorySnapshot } from "@observatory/core";
 import {
   ActivityTimeline,
+  AgentConversation,
   AgentGraph,
   AgentList,
   buildProviderGuidance,
@@ -70,6 +71,9 @@ describe("dashboard interactions", () => {
     expect(root).toHaveClass("agent-node--parent");
     expect(root.querySelector(".agent-node__children")).toHaveTextContent("1");
     expect(tester.querySelector(".agent-node__activity")).toHaveAttribute("data-current", "true");
+    expect(tester.querySelector(".agent-node__topline .agent-node__signals")).not.toBeInTheDocument();
+    expect(tester.querySelector(".agent-node__meta .agent-node__signals")).toHaveTextContent("S1W1L1");
+    expect(tester.querySelector(".agent-node__role")).toHaveAttribute("title", "testing");
     fireEvent.focus(tester);
     expect(screen.getByRole("tooltip")).toHaveTextContent("Checks behavior, quality, tests, and acceptance criteria.");
     expect(tester).toHaveAttribute("aria-describedby", expect.stringMatching(/^role-tooltip-/));
@@ -169,10 +173,11 @@ describe("dashboard interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Fit" }));
 
-    const transform = (viewport.querySelector(".graph__canvas") as HTMLElement).style.transform;
-    const scale = Number(transform.match(/scale\(([^)]+)\)/)?.[1]);
-    expect(scale).toBeGreaterThan(0.65);
-    expect(scale).toBeLessThan(0.8);
+    const scale = Number((viewport.querySelector(".graph__canvas") as HTMLElement).style.getPropertyValue("--graph-scale"));
+    expect(scale).toBeGreaterThan(0.6);
+    expect(scale).toBeLessThan(0.7);
+    expect(viewport.querySelector(".graph__camera")?.getAttribute("style")).not.toContain("scale(");
+    expect(viewport.querySelector(".agent-node")?.getAttribute("data-detail")).toBe("default");
   });
 
   it("pans with the wheel and zooms around the pointer with Control-wheel", () => {
@@ -182,15 +187,31 @@ describe("dashboard interactions", () => {
       width: 900, height: 600, left: 100, top: 50, right: 1_000, bottom: 650, x: 100, y: 50, toJSON: () => ({}),
     });
     fireEvent.click(screen.getByRole("button", { name: "Fit" }));
+    const camera = viewport.querySelector(".graph__camera") as HTMLElement;
     const canvas = viewport.querySelector(".graph__canvas") as HTMLElement;
-    const fittedTransform = canvas.style.transform;
+    const fittedTransform = camera.style.transform;
 
     fireEvent.wheel(viewport, { deltaX: 48, deltaY: 24 });
-    expect(canvas.style.transform).not.toBe(fittedTransform);
+    expect(camera.style.transform).not.toBe(fittedTransform);
 
     const scaleBefore = screen.getByLabelText(/Zoom \d+%/i).textContent;
     fireEvent.wheel(viewport, { deltaY: -20, ctrlKey: true, clientX: 500, clientY: 300 });
     expect(screen.getByLabelText(/Zoom \d+%/i).textContent).not.toBe(scaleBefore);
+  });
+
+  it("uses compact node content at overview scale but keeps the selected node detailed", () => {
+    const { rerender } = render(<AgentGraph snapshot={snapshot} onSelect={() => undefined} />);
+    const viewport = screen.getByLabelText(/Interactive agent graph/i);
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+      width: 360, height: 240, left: 0, top: 0, right: 360, bottom: 240, x: 0, y: 0, toJSON: () => ({}),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Fit" }));
+    expect(viewport.querySelector(".agent-node")?.getAttribute("data-detail")).toBe("compact");
+
+    rerender(<AgentGraph snapshot={snapshot} selectedId="tester" onSelect={() => undefined} />);
+    expect(screen.getByRole("button", { name: /Tester, Waiting/i })).toHaveAttribute("data-detail", "detailed");
+    expect(screen.getByRole("button", { name: /Main, Working/i })).toHaveAttribute("data-detail", "compact");
   });
 
   it("brings an off-screen selected node back into view", () => {
@@ -200,13 +221,13 @@ describe("dashboard interactions", () => {
       width: 600, height: 400, left: 0, top: 0, right: 600, bottom: 400, x: 0, y: 0, toJSON: () => ({}),
     });
     fireEvent.click(screen.getByRole("button", { name: "Fit" }));
-    const canvas = viewport.querySelector(".graph__canvas") as HTMLElement;
+    const camera = viewport.querySelector(".graph__camera") as HTMLElement;
     fireEvent.wheel(viewport, { deltaX: -2_000 });
-    const offscreenTransform = canvas.style.transform;
+    const offscreenTransform = camera.style.transform;
 
     rerender(<AgentGraph snapshot={snapshot} selectedId="tester" onSelect={() => undefined} />);
 
-    expect(canvas.style.transform).not.toBe(offscreenTransform);
+    expect(camera.style.transform).not.toBe(offscreenTransform);
   });
 
   it("selects an agent from the list", () => {
@@ -236,6 +257,26 @@ describe("dashboard interactions", () => {
 
     fireEvent.click(expand);
     expect(screen.getByText("Tester")).toBeInTheDocument();
+  });
+
+  it("collapses the agents panel without losing its reopen control", () => {
+    const onToggleCollapse = vi.fn();
+    const { rerender } = render(
+      <AgentList snapshot={snapshot} onSelect={() => undefined} onToggleCollapse={onToggleCollapse} />,
+    );
+
+    const collapse = screen.getByRole("button", { name: "Collapse agents panel" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    expect(collapse).toHaveAttribute("aria-controls", "agent-list-panel-content");
+    fireEvent.click(collapse);
+    expect(onToggleCollapse).toHaveBeenCalledOnce();
+
+    rerender(
+      <AgentList snapshot={snapshot} onSelect={() => undefined} collapsed onToggleCollapse={onToggleCollapse} />,
+    );
+    expect(screen.getByRole("complementary", { name: "Agents" })).toHaveAttribute("data-collapsed", "true");
+    expect(screen.getByRole("button", { name: "Expand agents panel" })).toHaveAttribute("aria-expanded", "false");
+    expect(document.getElementById("agent-list-panel-content")).toHaveAttribute("hidden");
   });
 
   it("filters agents by observed execution context", () => {
@@ -563,9 +604,145 @@ describe("dashboard interactions", () => {
     expect(screen.getByText("Authentication flow passed")).toBeInTheDocument();
     expect(screen.queryByText("Coordinating browser run")).not.toBeInTheDocument();
     expect(events.querySelector(".history-event__route")?.textContent).toContain("Human→Main");
+    expect(events.querySelector(".history-event__route")).toHaveAttribute("aria-label", "From Human to Main");
     expect(events.querySelectorAll(".history-event__route")[2]?.textContent).toContain("Main→Tester");
-    expect([...events.querySelectorAll(".history-event__phase > span")].map((node) => node.textContent))
+    expect([...events.querySelectorAll(".history-event__phase-label")].map((node) => node.textContent))
       .toEqual(["Request", "Decision", "Handoff", "Execution", "Result"]);
+    expect(events.querySelector(".history-event__meta .history-event__status")).not.toBeInTheDocument();
+    expect(events.querySelector(".history-event__phase .history-event__status")).toBeInTheDocument();
+    expect(events.querySelectorAll(".history-event__evidence")).toHaveLength(5);
+  });
+
+  it("follows the latest history until the reader scrolls away", () => {
+    const message = (id: string, occurredAt: number) => ({
+      id,
+      kind: "handoff" as const,
+      actor: { type: "agent" as const, id: "root" },
+      recipients: [{ type: "agent" as const, id: "tester" }],
+      summary: `Message ${id}`,
+      occurredAt,
+      source: "protocol" as const,
+    });
+    const { rerender } = render(<RunHistory
+      snapshot={{ ...snapshot, history: [message("one", 100), message("two", 200)] }}
+      selectedId="root"
+      mode="messages"
+    />);
+    const list = screen.getByRole("list", { name: "Messages, 2 events" });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 100 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 300 });
+    list.scrollTop = 200;
+    fireEvent.scroll(list);
+
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 400 });
+    rerender(<RunHistory
+      snapshot={{ ...snapshot, history: [message("three", 300), message("two", 200), message("one", 100)] }}
+      selectedId="root"
+      mode="messages"
+    />);
+    expect(list.scrollTop).toBe(300);
+
+    list.scrollTop = 80;
+    fireEvent.scroll(list);
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 500 });
+    rerender(<RunHistory
+      snapshot={{ ...snapshot, history: [message("four", 400), message("three", 300), message("two", 200), message("one", 100)] }}
+      selectedId="root"
+      mode="messages"
+    />);
+
+    expect(list.scrollTop).toBe(80);
+    const latest = screen.getByRole("button", { name: "1 new · Latest ↓" });
+    fireEvent.click(latest);
+    expect(list.scrollTop).toBe(400);
+    expect(screen.queryByRole("button", { name: /Latest/ })).not.toBeInTheDocument();
+  });
+
+  it("shows direct human and agent messages below the selected graph agent", () => {
+    const onClose = vi.fn();
+    const conversationSnapshot: ObservatorySnapshot = {
+      ...snapshot,
+      history: [
+        {
+          id: "root-result",
+          kind: "delivery",
+          actor: { type: "agent", id: "root" },
+          recipients: [{ type: "human" }],
+          summary: "Delivered final result",
+          content: "The verification is complete.",
+          occurredAt: 400,
+          source: "protocol",
+        },
+        {
+          id: "tester-result",
+          kind: "delivery",
+          actor: { type: "agent", id: "tester" },
+          recipients: [{ type: "agent", id: "root" }],
+          summary: "Reported result",
+          content: "All checks passed.",
+          occurredAt: 300,
+          source: "protocol",
+        },
+        {
+          id: "peer-message",
+          kind: "handoff",
+          relationKind: "message",
+          actor: { type: "agent", id: "root" },
+          recipients: [{ type: "agent", id: "tester" }],
+          summary: "Sent message",
+          occurredAt: 250,
+          source: "protocol",
+        },
+        {
+          id: "assignment",
+          kind: "handoff",
+          relationKind: "task",
+          actor: { type: "agent", id: "root" },
+          recipients: [{ type: "agent", id: "tester" }],
+          summary: "Assigned verification",
+          content: "Run the checks.",
+          occurredAt: 200,
+          source: "protocol",
+        },
+        {
+          id: "approval-request",
+          kind: "request",
+          actor: { type: "agent", id: "root" },
+          recipients: [{ type: "human" }],
+          summary: "Approval required",
+          content: "Approve the command.",
+          occurredAt: 150,
+          source: "derived",
+        },
+        {
+          id: "human-request",
+          kind: "request",
+          actor: { type: "human" },
+          recipients: [{ type: "agent", id: "root" }],
+          summary: "Request received",
+          content: "Please verify the change.",
+          occurredAt: 100,
+          source: "protocol",
+        },
+      ],
+    };
+
+    render(<AgentConversation snapshot={conversationSnapshot} selectedId="root" onClose={onClose} />);
+
+    expect(screen.getByRole("list", { name: "Main conversation, 4 messages" })).toBeInTheDocument();
+    expect(screen.getByText("Please verify the change.").closest(".conversation-event")).toHaveAttribute("data-side", "human");
+    expect(screen.getByText("All checks passed.").closest(".conversation-event")).toHaveAttribute("data-side", "agent");
+    expect(screen.queryByText("Assigned verification")).not.toBeInTheDocument();
+    expect(screen.queryByText("Approve the command.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Delivered final result")).not.toBeInTheDocument();
+    expect(screen.getByText("Message content was not captured.")).toBeInTheDocument();
+    expect(screen.getAllByText("@main")).toHaveLength(2);
+    expect(screen.getByText("@tester")).toBeInTheDocument();
+    expect(screen.getByText("@human")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("To Main")).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close Main conversation" }));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("explains metadata-only Story content capture for the selected provider", () => {
@@ -692,6 +869,48 @@ describe("dashboard interactions", () => {
     expect(screen.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "false");
     expect(screen.getByRole("tab", { name: "Inspector" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Close inspector" })).not.toBeInTheDocument();
+  });
+
+  it("collapses the right rail while preserving the selected inspector state", () => {
+    const onToggleCollapse = vi.fn();
+    const { rerender } = render(
+      <RightRail
+        snapshot={snapshot}
+        selectedId="tester"
+        onClear={() => undefined}
+        now={5_000}
+        onToggleCollapse={onToggleCollapse}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse activity and inspector panel" }));
+    expect(onToggleCollapse).toHaveBeenCalledOnce();
+
+    rerender(
+      <RightRail
+        snapshot={snapshot}
+        selectedId="tester"
+        onClear={() => undefined}
+        now={5_000}
+        collapsed
+        onToggleCollapse={onToggleCollapse}
+      />,
+    );
+    expect(screen.getByRole("complementary", { name: "Activity and agent inspector" })).toHaveAttribute("data-collapsed", "true");
+    expect(screen.getByRole("button", { name: "Expand activity and inspector panel" })).toHaveAttribute("aria-expanded", "false");
+    expect(document.getElementById("right-rail-panel-content")).toHaveAttribute("hidden");
+    expect(screen.queryByRole("button", { name: "Close inspector" })).not.toBeInTheDocument();
+
+    rerender(
+      <RightRail
+        snapshot={snapshot}
+        selectedId="tester"
+        onClear={() => undefined}
+        now={5_000}
+        onToggleCollapse={onToggleCollapse}
+      />,
+    );
+    expect(screen.getByRole("tab", { name: "Inspector" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("groups agents into evidence-based workflow lanes", () => {

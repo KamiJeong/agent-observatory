@@ -2,6 +2,7 @@ import { useMemo, type CSSProperties } from "react";
 import type { HistoryActor, HistoryEvent, ObservatorySnapshot } from "@observatory/core";
 import { agentProvider, formatTime, ProviderBadge, roleColor, shortId } from "../shared/presentation.tsx";
 import { agentBranchIds, historyEventIsInBranch } from "./agent-scope.ts";
+import { useLatestFeed } from "./use-latest-feed.ts";
 
 export type RunHistoryMode = "story" | "messages";
 
@@ -105,10 +106,17 @@ function actorColor(actor: HistoryActor, snapshot: ObservatorySnapshot): string 
 function HistoryRoute({ event, snapshot }: { event: HistoryEvent; snapshot: ObservatorySnapshot }) {
   const actor = event.actor.type === "agent" && event.actor.id ? snapshot.agents[event.actor.id] : undefined;
   const recipients = event.recipients ?? [];
+  const senderLabel = actorLabel(event.actor, snapshot);
+  const recipientLabels = recipients.map((recipient) => actorLabel(recipient, snapshot));
   return (
-    <span className="history-event__route">
+    <span
+      className="history-event__route"
+      aria-label={recipientLabels.length > 0
+        ? `From ${senderLabel} to ${recipientLabels.join(", ")}`
+        : `From ${senderLabel}`}
+    >
       {actor && <ProviderBadge provider={agentProvider(actor, snapshot.runtime.adapter)} compact />}
-      <strong>{actorLabel(event.actor, snapshot)}</strong>
+      <strong>{senderLabel}</strong>
       {recipients.length > 0 && <>
         <span aria-hidden="true">→</span>
         <span className="history-event__recipients">
@@ -182,6 +190,17 @@ export function RunHistory({
     return mode === "story" ? storyEvents(filtered) : filtered;
   }, [branchIds, mode, snapshot.history]);
   const contentPolicy = capturePolicy(snapshot, branchIds);
+  const eventIds = useMemo(() => events.map((event) => event.id), [events]);
+  const {
+    atLatest,
+    containerRef,
+    handleScroll,
+    jumpToLatest,
+    newItemCount,
+  } = useLatestFeed<HTMLOListElement>({
+    itemIds: eventIds,
+    scopeKey: `${selectedId ?? "none"}:${mode}`,
+  });
 
   return (
     <div className="run-history-shell">
@@ -191,7 +210,12 @@ export function RunHistory({
           <span>Story shows observed metadata. Restart with <code>bun run dev:real -- --capture-content</code> to include bounded request and result text.</span>
         </aside>
       )}
-      <ol className="run-history" aria-label={`${mode === "story" ? "Run history" : "Messages"}, ${events.length} events`}>
+      <ol
+        className="run-history"
+        ref={containerRef}
+        aria-label={`${mode === "story" ? "Run history" : "Messages"}, ${events.length} events`}
+        onScroll={handleScroll}
+      >
         {events.map((event) => {
         const style = {
           "--history-color": actorColor(event.actor, snapshot),
@@ -204,19 +228,19 @@ export function RunHistory({
             </span>
             <article>
               <div className="history-event__phase">
-                <span>{phaseLabel(event)}</span>
-                <small>Evidence · {event.source}</small>
-              </div>
-              <div className="history-event__meta">
-                <HistoryRoute event={event} snapshot={snapshot} />
+                <span className="history-event__phase-label">{phaseLabel(event)}</span>
                 <span className={`history-event__status history-event__status--${event.status ?? "recorded"}`}>
                   {event.status ?? event.kind}
                 </span>
+              </div>
+              <div className="history-event__meta">
+                <HistoryRoute event={event} snapshot={snapshot} />
               </div>
               <strong className="history-event__summary">{event.summary}</strong>
               {event.kind === "work"
                 ? <ExecutionDetail event={event} />
                 : event.content && <HistoryContent content={event.content} />}
+              <small className="history-event__evidence">Evidence · {event.source}</small>
             </article>
           </li>
         );
@@ -230,6 +254,11 @@ export function RunHistory({
           </li>
         )}
       </ol>
+      {!atLatest && events.length > 0 && (
+        <button className="latest-feed-button" onClick={jumpToLatest}>
+          {newItemCount > 0 ? `${newItemCount} new · ` : ""}Latest ↓
+        </button>
+      )}
     </div>
   );
 }
