@@ -26,10 +26,10 @@ Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 �
 
 ## 데모
 
-![Codex와 Claude 에이전트를 한 화면에 표시하는 Agent Observatory](docs/assets/agent-observatory-demo.png)
+![선택한 에이전트 대화와 Codex·Claude 그래프를 함께 표시하는 Agent Observatory](docs/assets/agent-observatory-demo.png)
 
 <details>
-<summary>Provider 필터, 관계 보기, Story, Inspector, Workflow Board 동작 보기</summary>
+<summary>Workspace 포커스, 에이전트 대화, 관계, Story, Inspector, Workflow Board 동작 보기</summary>
 
 ![Agent Observatory multi-provider 인터랙션 데모](docs/assets/agent-observatory-demo.gif)
 
@@ -37,6 +37,20 @@ Observatory 도메인 이벤트로 정규화한 뒤, 에이전트 그래프와 �
 
 데모에는 로컬 세션 데이터 대신 결정론적이고 내용이 안전한 fixture를 사용합니다.
 `bunx agent-observatory --scenario demo`로 동일한 화면을 실행할 수 있습니다.
+
+## 현재 릴리스 주요 변경 사항
+
+- **다중 workspace 포커스**: Real Mode는 모든 활성 workspace의 Codex와 Claude를
+  함께 표시합니다. 서버를 다시 시작하지 않고 provider, workspace, session, status,
+  activity 검색 필터로 범위를 좁힐 수 있습니다.
+- **에이전트별 직접 대화**: 그래프 노드를 선택하면 토폴로지 아래에서 관측된
+  Human ↔ agent 및 agent ↔ agent 메시지 흐름을 확인할 수 있습니다. 내용 캡처
+  정책도 대화 안에 명시됩니다.
+- **읽기 편한 실시간 피드**: Conversation, Story, Messages, Trace는 사용자가 최신
+  항목을 보고 있을 때만 새 근거를 자동으로 따라갑니다. 위로 스크롤하면 읽던
+  위치를 유지하고 `Latest` 바로가기를 제공합니다.
+- **밀도 높은 workspace 제어**: 양쪽 패널을 독립적으로 접을 수 있고, 그래프 노드는
+  확대 수준에 맞춰 정보량을 조절하면서 선택한 에이전트는 계속 자세히 표시합니다.
 
 ## 빠른 시작
 
@@ -142,6 +156,7 @@ bun run dev:real -- --cwd /absolute/path/to/project
 - **Agents**: 부모/자식 트리, 상태, 역할, 모델/추론 강도, 스킬/워크플로 근거
 - **Provider 상태 및 필터**: Codex/Claude 독립 상태와 provider, workspace, session, status, 검색 필터
 - **Agent Graph**: 생성 토폴로지와 근거가 표시된 task, handoff, message 관계
+- **Conversation**: 그래프에서 선택한 에이전트의 Human/agent 및 agent/agent 직접 메시지와 명시적인 내용 보호 상태
 - **Workflow Board**: 관측된 워크플로별 에이전트 레인과 Started/Status/Updated 정렬
 - **Run History**: 요청, 결정, 인계, 전달, 완료를 Agent lane으로 보여 주는 인간 중심 히스토리
 - **Trace**: 도구, 명령, 파일, 테스트, 오류 필터를 제공하는 저수준 가상화 타임라인
@@ -201,11 +216,14 @@ React 컴포넌트는 원시 provider 레코드를 직접 사용하지 않습니
 
 - 네이티브 근거 기반 상태를 표시하는 접이식 부모/자식 에이전트 목록
 - 장애가 격리된 하나의 composite runtime에서 Codex와 Claude 동시 표시
-- Provider 상태 및 provider/session/workspace/status/검색 필터
+- Provider 상태 및 provider/workspace/session/status/activity 검색 필터
 - 설정, 빈 상태, 권한, 미지원 버전, 부분 장애에 대한 복구 안내
 - 시맨틱 HTML 노드와 SVG 연결선으로 구성한 루트/서브에이전트 트리
 - 근거 출처가 표시되는 spawn, task, handoff, message 관계
-- 그래프 이동, 확대·축소, 맞춤, 키보드 선택, 활성 선택 강조
+- 그래프 이동, 확대·축소, 맞춤, 키보드 선택, 활성 선택 강조, 확대 수준에 따른 노드 정보 조절
+- 관측된 Human 및 agent 메시지를 보여 주는 선택 에이전트 직접 대화 보기
+- 읽던 스크롤 위치를 보존하며 최신 항목을 자동 추적하는 Conversation, Story, Messages, Trace
+- 독립적으로 접을 수 있는 Agents 및 History/Inspector 패널
 - 에이전트 목록, 그래프 노드, Inspector에 관측된 모델과 추론 강도 표시
 - 에이전트 필터 및 노드별 마커가 있는 관측된 스킬/워크플로 문맥
 - 관측 순서/상태/업데이트 정렬을 지원하는 근거 기반 Workflow Board
@@ -240,8 +258,8 @@ collab completed       → COMPLETED
 | Codex | Linux / WSL2 | `/proc`에서 대화형 프로세스의 cwd를 읽음 | 지원됨, WSL2 Linux에서 로컬 검증 |
 | Codex | macOS | `ps`로 프로세스를 찾고 `lsof`로 cwd를 확인 | 구현됨, 네이티브 기기 검증 예정 |
 | Codex | Windows | PowerShell CIM 사용, `-C`/`--cd`가 없으면 최근 Codex 상태 선택 | 구현됨, 네이티브 기기 검증 예정 |
-| Claude | Linux / WSL2 | procfs cwd와 제한된 transcript 및 Agent Teams 호환성 근거 사용 | 지원됨, WSL2 Linux에서 로컬 검증 |
-| Claude | macOS / Windows | 정확한 live process mapping 없이 transcript-only 기록 탐색 | 호환성 fallback, 네이티브 기기 검증 예정 |
+| Claude | Linux / WSL2 | 가능한 경우 활성 프로세스를 열린 transcript와 연결하고, 아니면 프로세스와 cwd별 최신 root를 선택 | 지원됨, WSL2 Linux에서 로컬 검증 |
+| Claude | macOS / Windows | 실시간 프로세스 연결 미구현, 과거 transcript를 live graph에 불러오지 않음 | 제한적 호환성, 네이티브 기기 구현 예정 |
 
 Codex와 Observatory는 같은 OS 환경에서 실행되고 동일한 `CODEX_HOME`을 사용해야
 합니다. 예를 들어 네이티브 Windows에서 실행한 Observatory는 WSL 안에서 실행 중인
@@ -409,10 +427,12 @@ codex-cli 0.149.0
 ## Real Claude Code Mode
 
 Claude 관측은 버전을 인식하는 읽기 전용 호환성 어댑터입니다. Linux에서는 활성 작업
-디렉터리를 찾고, 크기가 제한된 root/subagent transcript tail과 Agent Teams beta의
-config, task, mailbox 메타데이터를 읽습니다. Prompt, response, thinking, command,
-tool input, task 내용, mailbox 본문은 보관하지 않습니다. 다른 플랫폼은 현재
-transcript-only 기록 탐색을 사용합니다. 공식 hook과 OpenTelemetry는 향후 정확도
+디렉터리를 찾고, 각 Claude 프로세스가 열어 둔 transcript 파일을 우선 사용하며,
+없으면 프로세스와 cwd별 최신 root transcript로 폴백합니다. 선택한 root와 그
+subagent, 근거로 연결된 Agent Teams 멤버만 live graph에 포함하며, 종료된 과거
+session은 디스크에서 건드리지 않고 불러오지 않습니다. 크기가 제한된 요청 및 최종
+응답 내용에는 내용 캡처 정책을 적용하고, thinking, command, tool input/result, task
+내용 및 mailbox 내용은 계속 제외합니다. 공식 hook과 OpenTelemetry는 향후 정확도
 향상 항목입니다. 근거, 개인정보, 버전 경계는
 [Claude 호환성 문서](docs/claude-compatibility.md)를 참고하세요.
 

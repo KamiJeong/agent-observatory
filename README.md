@@ -28,10 +28,10 @@ are working in parallel:
 
 ## Demo
 
-![Agent Observatory showing Codex and Claude agents in one dashboard](docs/assets/agent-observatory-demo.png)
+![Agent Observatory showing a selected agent conversation alongside the Codex and Claude graph](docs/assets/agent-observatory-demo.png)
 
 <details>
-<summary>Watch the provider filter, relationship view, Story, Inspector, and Workflow Board</summary>
+<summary>Watch workspace focus, agent conversations, relationships, Story, Inspector, and Workflow Board</summary>
 
 ![Agent Observatory multi-provider interaction demo](docs/assets/agent-observatory-demo.gif)
 
@@ -39,6 +39,21 @@ are working in parallel:
 
 The demo uses a deterministic, content-safe fixture rather than local session
 data. Reproduce it with `bunx agent-observatory --scenario demo`.
+
+## Current release highlights
+
+- **Multi-workspace focus**: Real Mode starts with Codex and Claude across all
+  active workspaces; provider, workspace, session, status, and activity search
+  filters narrow the view without restarting the server.
+- **Direct agent conversations**: Select a graph node to open the observed
+  Human ↔ agent and agent ↔ agent message flow below the topology.
+  Content-capture policy remains visible in the conversation itself.
+- **Readable live feeds**: Conversation, Story, Messages, and Trace follow new
+  evidence while you are at the latest item, then preserve your reading
+  position and offer a `Latest` shortcut when you scroll away.
+- **Denser workspace controls**: Both side panels collapse independently, and
+  graph nodes adapt their detail to the zoom level while keeping the selected
+  agent readable.
 
 ## Quick Start
 
@@ -147,6 +162,7 @@ bun run dev:real -- --cwd /absolute/path/to/project
 - **Agents**: Parent/child tree, status, role, model/effort, and skill/workflow evidence
 - **Provider Health & Filters**: Independent Codex/Claude health plus provider, workspace, session, status, and search filters
 - **Agent Graph**: Spawn topology plus task, handoff, and message relationships with evidence
+- **Conversation**: Direct Human/agent and agent/agent messages for the graph selection, with explicit content-privacy state
 - **Workflow Board**: Agent lanes grouped by observed workflow, sortable by Started/Status/Updated
 - **Run History**: Human-readable request, decision, handoff, delivery, and completion story scoped to the selected agent branch
 - **Trace**: Selected-branch low-level timeline with virtualized tool, command, file, test, and error filters
@@ -207,11 +223,14 @@ a bounded debug buffer, and unknown methods do not crash the dashboard.
 
 - Collapsible parent/child agent list with native-evidence-based status
 - Codex and Claude agents in one failure-isolated composite runtime
-- Provider health plus provider/session/workspace/status/search filters
+- Provider health plus provider/workspace/session/status/activity-search filters
 - Actionable setup, empty, permission, unsupported-version, and partial-failure states
 - Root/subagent tree with semantic HTML nodes and SVG connectors
 - Spawn, task, handoff, and message relationships with evidence provenance
-- Graph pan, zoom, fit, keyboard selection, and active selection highlight
+- Graph pan, zoom, fit, keyboard selection, active selection highlight, and zoom-aware node detail
+- Direct selected-agent conversation view for observed Human and agent messages
+- Auto-following Conversation, Story, Messages, and Trace feeds that preserve the reader's scroll position
+- Independently collapsible Agents and History/Inspector panels
 - Agent list, graph nodes, and Inspector expose observed model and reasoning effort
 - Observed skill/workflow context with Agent filters and per-node markers
 - Evidence-based Workflow Board with observed-order/status/update sorting

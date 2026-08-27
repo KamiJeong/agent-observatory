@@ -52,6 +52,12 @@ async function capture(baseUrl) {
     await screenshotPage.getByRole("heading", { name: "Agent Observatory" }).waitFor();
     await screenshotPage.getByRole("button", { name: /^Status: Working Release Orchestrator/ }).click();
     await screenshotPage.getByRole("tab", { name: "History", exact: true }).click();
+    await screenshotPage
+      .getByLabel(/Interactive agent graph/)
+      .getByRole("button", { name: /^Release Orchestrator, Working/ })
+      .click();
+    await screenshotPage.getByRole("heading", { name: "Release Orchestrator" }).waitFor();
+    await screenshotPage.getByLabel(/Interactive agent graph/).focus();
     await screenshotPage.screenshot({
       path: join(assetsDirectory, "agent-observatory-demo.png"),
       animations: "disabled",
@@ -79,6 +85,12 @@ async function capture(baseUrl) {
     await page.waitForTimeout(800);
     await page.getByRole("button", { name: /^Status: Working Release Orchestrator/ }).click();
     await page.getByRole("tab", { name: "History", exact: true }).click();
+    await page.waitForTimeout(1_600);
+    await page
+      .getByLabel(/Interactive agent graph/)
+      .getByRole("button", { name: /^Release Orchestrator, Working/ })
+      .click();
+    await page.getByLabel(/Interactive agent graph/).focus();
     await page.waitForTimeout(1_600);
     await page.getByRole("button", { name: "Show all 3 secondary relations" }).click();
     await page.waitForTimeout(1_200);
