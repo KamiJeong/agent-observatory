@@ -232,7 +232,7 @@ function contentCaptureEnabled(environment = process.env) {
 // package.json
 var package_default = {
   name: "agent-observatory",
-  version: "0.3.0",
+  version: "0.3.1",
   description: "Local observability dashboard for Codex and Claude Code multi-agent workflows",
   license: "MIT",
   type: "module",
